@@ -1071,3 +1071,123 @@ def mtf_cmd(
                   f"(score: {result.consensus_score:+.2f}, alignment: {result.alignment})")
     console.print(f"[dim]Bullish: {result.n_bullish} | Bearish: {result.n_bearish} | "
                   f"Neutral: {result.n_neutral}[/dim]")
+
+
+@quant_app.command("dashboard")
+def dashboard_cmd() -> None:
+    """Show unified risk dashboard — regime, risk metrics, tail risk, sectors."""
+    from ..portfolio.tracker import PortfolioTracker
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.dashboard import build_dashboard
+
+    tracker = PortfolioTracker()
+
+    with console.status("[bold cyan]Building risk dashboard...", spinner="dots"):
+        state = tracker.get_state()
+
+        # Portfolio returns
+        port_returns = None
+        tickers = sorted(state.positions.keys()) if state.positions else []
+        if tickers:
+            try:
+                ret_arr, valid = fetch_returns(tickers, lookback_days=252)
+                if ret_arr is not None and len(valid) > 0:
+                    # Equal-weight portfolio returns as proxy
+                    port_returns = ret_arr.mean(axis=1)
+            except Exception:
+                pass
+
+        # HMM regime
+        regime = "unknown"
+        regime_conf = 0.0
+        try:
+            from ..quant.regime import fit_regime_model
+            spy_ret, spy_valid = fetch_returns(["SPY"], lookback_days=504)
+            if spy_ret is not None and len(spy_valid) > 0 and len(spy_ret) >= 100:
+                hmm = fit_regime_model(spy_ret[:, 0], n_regimes=3)
+                regime = hmm.current_label
+                regime_conf = float(hmm.current_probs[hmm.current_regime])
+        except Exception:
+            pass
+
+        # EVT on portfolio returns
+        tail_type = "unknown"
+        var_99 = 0.0
+        cvar_99 = 0.0
+        if port_returns is not None and len(port_returns) >= 100:
+            try:
+                from ..quant.evt import evt_tail_risk
+                evt = evt_tail_risk(port_returns)
+                tail_type = evt.tail_type
+                var_99 = evt.var_99
+                cvar_99 = evt.cvar_99
+            except Exception:
+                pass
+
+        # Sector leaders
+        top_sector = ""
+        bottom_sector = ""
+        try:
+            from ..quant.sector_rotation import SECTOR_ETFS, analyze_sectors
+            import yfinance as yf
+            from datetime import datetime, timedelta
+            end = datetime.now()
+            start = end - timedelta(days=300)
+            sector_tickers = list(SECTOR_ETFS.keys())
+            hist = yf.download(sector_tickers, start=start.strftime("%Y-%m-%d"),
+                               end=end.strftime("%Y-%m-%d"), progress=False)["Close"].dropna()
+            if len(hist) >= 30:
+                price_data = {t: hist[t].values for t in SECTOR_ETFS if t in hist.columns}
+                sr = analyze_sectors(price_data)
+                if sr.leaders:
+                    top_sector = sr.leaders[0].ticker
+                if sr.laggards:
+                    bottom_sector = sr.laggards[-1].ticker
+        except Exception:
+            pass
+
+        dashboard = build_dashboard(
+            portfolio_returns=port_returns,
+            regime=regime,
+            regime_confidence=regime_conf,
+            tail_type=tail_type,
+            var_99=var_99,
+            cvar_99=cvar_99,
+            top_sector=top_sector,
+            bottom_sector=bottom_sector,
+        )
+
+    # Display
+    risk_styles = {
+        "low": "bold green", "moderate": "green", "elevated": "yellow",
+        "high": "bold red", "extreme": "bold white on red",
+    }
+    rs = risk_styles.get(dashboard.risk_level, "white")
+
+    table = Table(title="Portfolio Risk Dashboard", show_header=False, padding=(0, 2))
+    table.add_column("Metric", style="cyan", min_width=20)
+    table.add_column("Value", min_width=30)
+
+    table.add_row("Risk Score", Text(f"{dashboard.risk_score:.0f}/100 ({dashboard.risk_level.upper()})", style=rs))
+    table.add_row("", "")
+    regime_style = {"bull": "green", "bear": "red", "crisis": "bold red", "neutral": "yellow"}.get(regime, "white")
+    table.add_row("Market Regime", Text(f"{dashboard.regime.upper()} ({dashboard.regime_confidence:.0%})", style=regime_style))
+    table.add_row("Sharpe Ratio", f"{dashboard.sharpe_ratio:.2f}")
+    table.add_row("Sortino Ratio", f"{dashboard.sortino_ratio:.2f}")
+    table.add_row("Max Drawdown", f"{dashboard.max_drawdown:.1%}")
+    table.add_row("", "")
+    tail_style = {"heavy": "red", "exponential": "yellow", "bounded": "green"}.get(tail_type, "dim")
+    table.add_row("Tail Type", Text(dashboard.tail_type.upper(), style=tail_style))
+    table.add_row("VaR 99%", f"{dashboard.var_99:.2%}")
+    table.add_row("CVaR 99%", f"{dashboard.cvar_99:.2%}")
+    table.add_row("", "")
+    if top_sector:
+        table.add_row("Leading Sector", Text(top_sector, style="green"))
+    if bottom_sector:
+        table.add_row("Lagging Sector", Text(bottom_sector, style="red"))
+    table.add_row("", "")
+    table.add_row("Health", dashboard.health_summary)
+
+    console.print(table)
+    console.print(f"\n[dim]Portfolio: ${state.total_value:,.0f} | "
+                  f"Positions: {len(state.positions)} | Cash: ${state.cash:,.0f}[/dim]")
