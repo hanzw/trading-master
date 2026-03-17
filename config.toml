@@ -1,0 +1,28 @@
+[llm]
+provider = "openai"          # "openai", "anthropic", "ollama"
+model = "gpt-4o-mini"        # or "claude-sonnet-4-20250514", "llama3.1"
+temperature = 0.3
+max_tokens = 2000
+
+[portfolio]
+db_path = "data/trading_master.db"
+snapshot_dir = "data/snapshots"
+default_cash = 10000.0
+
+[analysis]
+debate_rounds = 1
+parallel_analysts = true
+cache_ttl_hours = 4
+
+[risk]
+max_position_pct = 8.0       # Max % of portfolio in single stock
+max_sector_pct = 20.0        # Max % in single sector
+stop_loss_pct = 8.0          # Default stop-loss %
+
+[budget]
+max_cost_per_run = 5.0
+warn_cost = 2.0
+max_tokens_per_run = 500000
+
+[circuit_breaker]
+max_drawdown_pct = 15.0
