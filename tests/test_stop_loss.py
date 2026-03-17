@@ -134,3 +134,88 @@ class TestCheckAll:
             results = monitor.check_all()
 
         assert results == []
+
+
+# ── Trailing stops ────────────────────────────────────────────────
+
+
+class TestTrailingStops:
+    def test_set_trailing_stop(self, monitor):
+        """set_trailing_stop should compute stop = price - multiplier * ATR."""
+        with patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            stop = monitor.set_trailing_stop("AAPL", atr_multiplier=2.0, current_price=100.0)
+
+        assert stop == pytest.approx(90.0, abs=0.01)  # 100 - 2*5
+        assert monitor.get_stop_loss("AAPL") == pytest.approx(90.0, abs=0.01)
+
+    def test_set_trailing_stop_stores_metadata(self, monitor):
+        """Trailing stop metadata should be retrievable."""
+        with patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            monitor.set_trailing_stop("AAPL", atr_multiplier=2.5, current_price=100.0)
+
+        meta = monitor.get_trailing_stop_meta("AAPL")
+        assert meta is not None
+        assert meta["atr_multiplier"] == 2.5
+        assert meta["highest_price"] == 100.0
+        assert meta["atr"] == 5.0
+
+    def test_trailing_stop_ratchets_up(self, monitor, tracker):
+        """When price rises, trailing stop should ratchet up."""
+        tracker.execute_action("AAPL", Action.BUY, 10, 100.0)
+
+        # Initially set trailing stop at price=100, ATR=5, mult=2 → stop=90
+        with patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            monitor.set_trailing_stop("AAPL", atr_multiplier=2.0, current_price=100.0)
+
+        assert monitor.get_stop_loss("AAPL") == pytest.approx(90.0, abs=0.01)
+
+        # Price rises to 120 → new stop should be 120 - 2*5 = 110
+        with patch.object(StopLossMonitor, "_fetch_prices", return_value={"AAPL": 120.0}), \
+             patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            results = monitor.update_trailing_stops()
+
+        assert len(results) == 1
+        assert results[0]["ticker"] == "AAPL"
+        assert results[0]["ratcheted"] is True
+        assert results[0]["new_stop"] == pytest.approx(110.0, abs=0.01)
+        assert monitor.get_stop_loss("AAPL") == pytest.approx(110.0, abs=0.01)
+
+    def test_trailing_stop_does_not_ratchet_down(self, monitor, tracker):
+        """When price drops, trailing stop should NOT decrease."""
+        tracker.execute_action("AAPL", Action.BUY, 10, 100.0)
+
+        with patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            monitor.set_trailing_stop("AAPL", atr_multiplier=2.0, current_price=100.0)
+
+        original_stop = monitor.get_stop_loss("AAPL")  # 90.0
+
+        # Price drops to 95 → candidate stop = 95 - 10 = 85, but should stay at 90
+        with patch.object(StopLossMonitor, "_fetch_prices", return_value={"AAPL": 95.0}), \
+             patch.object(StopLossMonitor, "_fetch_atr", return_value=5.0):
+            results = monitor.update_trailing_stops()
+
+        assert len(results) == 1
+        assert results[0]["ratcheted"] is False
+        assert results[0]["new_stop"] == pytest.approx(original_stop, abs=0.01)
+        assert monitor.get_stop_loss("AAPL") == pytest.approx(original_stop, abs=0.01)
+
+    def test_trailing_stop_no_positions_returns_empty(self, monitor):
+        """With no positions, update_trailing_stops returns empty list."""
+        results = monitor.update_trailing_stops()
+        assert results == []
+
+    def test_trailing_stop_skips_non_trailing(self, monitor, tracker):
+        """Positions with fixed stops (no trailing metadata) are skipped."""
+        tracker.execute_action("AAPL", Action.BUY, 10, 150.0)
+        monitor.set_stop_loss("AAPL", 130.0)  # fixed stop, no trailing metadata
+
+        with patch.object(StopLossMonitor, "_fetch_prices", return_value={"AAPL": 160.0}):
+            results = monitor.update_trailing_stops()
+
+        assert results == []  # AAPL has no trailing metadata
+
+    def test_set_trailing_stop_zero_atr_raises(self, monitor):
+        """If ATR is zero, set_trailing_stop should raise ValueError."""
+        with patch.object(StopLossMonitor, "_fetch_atr", return_value=0.0):
+            with pytest.raises(ValueError, match="ATR"):
+                monitor.set_trailing_stop("AAPL", current_price=100.0)

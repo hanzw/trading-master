@@ -322,6 +322,33 @@ def portfolio_health(
     stop_border = "red" if triggered_stops else ("yellow" if no_stop_tickers else "green")
     console.print(Panel(stop_text, title="Stop-Loss Status", border_style=stop_border))
 
+    # 5b. Trailing Stop Status
+    trailing_tickers = []
+    for ticker_name in state.positions:
+        meta = monitor.get_trailing_stop_meta(ticker_name)
+        if meta is not None:
+            trailing_tickers.append((ticker_name, meta))
+
+    if trailing_tickers:
+        trail_table = Table(show_header=True, header_style="bold magenta")
+        trail_table.add_column("Ticker", style="cyan")
+        trail_table.add_column("Stop Price", justify="right")
+        trail_table.add_column("Highest", justify="right")
+        trail_table.add_column("ATR Mult", justify="right")
+        trail_table.add_column("ATR", justify="right")
+
+        for ticker_name, meta in trailing_tickers:
+            stop = monitor.get_stop_loss(ticker_name)
+            trail_table.add_row(
+                ticker_name,
+                f"${stop:,.2f}" if stop else "-",
+                f"${meta['highest_price']:,.2f}",
+                f"{meta['atr_multiplier']:.1f}x",
+                f"${meta['atr']:,.2f}",
+            )
+
+        console.print(Panel(trail_table, title="Trailing Stops (ATR-based)", border_style="cyan"))
+
     # 6. Regime-Adjusted Allocation Alerts
     if regime is None:
         try:

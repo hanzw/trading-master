@@ -149,10 +149,16 @@ def compute_position_size(
     regime: str | None = None,
     holding_days: int = 20,
     hurst: float | None = None,
+    win_rate: float | None = None,
+    avg_win_loss_ratio: float | None = None,
 ) -> dict:
     """Master sizing function.
 
-    Combines volatility-adjusted sizing with a hard cap and correlation haircut.
+    Combines volatility-adjusted sizing with a hard cap, correlation haircut,
+    and optional Kelly criterion constraint.
+
+    When *win_rate* and *avg_win_loss_ratio* are both provided, Kelly fraction
+    is computed and used as an additional upper bound on position size.
     When *hurst* is provided, ATR is scaled by ``N^H`` instead of ``N^0.5``.
 
     Returns::
@@ -162,6 +168,8 @@ def compute_position_size(
             "method": str,
             "dollar_amount": float,
             "pct_of_portfolio": float,
+            "kelly_used": bool,
+            "kelly_fraction_raw": float,
         }
     """
     if price <= 0 or portfolio_value <= 0:
@@ -170,6 +178,8 @@ def compute_position_size(
             "method": "invalid_input",
             "dollar_amount": 0.0,
             "pct_of_portfolio": 0.0,
+            "kelly_used": False,
+            "kelly_fraction_raw": 0.0,
         }
 
     # 1. Volatility-based size (scaled by holding period, optionally Hurst-aware)
@@ -182,11 +192,31 @@ def compute_position_size(
     max_dollar = portfolio_value * (max_position_pct / 100.0)
     cap_shares = int(max_dollar / price) if price > 0 else 0
 
-    shares = min(vol_shares, cap_shares)
-    if shares == cap_shares and cap_shares < vol_shares:
-        method = "max_position_cap"
+    # 3. Kelly criterion constraint (optional)
+    kelly_used = False
+    kelly_frac_raw = 0.0
+    kelly_shares = None
 
-    # 3. Correlation adjustment
+    if win_rate is not None and avg_win_loss_ratio is not None:
+        # avg_win_loss_ratio = avg_win / avg_loss; use avg_win=ratio, avg_loss=1.0
+        kelly_frac_raw = kelly_fraction(win_rate, avg_win_loss_ratio, 1.0)
+        if kelly_frac_raw > 0:
+            kelly_shares = int(kelly_frac_raw * portfolio_value / price)
+            kelly_used = True
+
+    # Combine constraints: vol, cap, and optionally kelly
+    if kelly_shares is not None:
+        shares = min(vol_shares, cap_shares, kelly_shares)
+        if shares == kelly_shares and kelly_shares < vol_shares and kelly_shares < cap_shares:
+            method = "kelly_constrained"
+        elif shares == cap_shares and cap_shares < vol_shares:
+            method = "max_position_cap"
+    else:
+        shares = min(vol_shares, cap_shares)
+        if shares == cap_shares and cap_shares < vol_shares:
+            method = "max_position_cap"
+
+    # 4. Correlation adjustment
     if existing_correlation > 0:
         multiplier = max(1.0 - existing_correlation, 0.2)
         adjusted = int(shares * multiplier)
@@ -194,7 +224,7 @@ def compute_position_size(
         shares = max(adjusted, floor)
         method += "+correlation_adj"
 
-    # 4. Regime adjustment
+    # 5. Regime adjustment
     if regime is not None:
         shares = regime_adjusted_size(shares, regime, price)
         method += "+regime_adj"
@@ -208,6 +238,8 @@ def compute_position_size(
         "method": method,
         "dollar_amount": dollar_amount,
         "pct_of_portfolio": round(pct, 4),
+        "kelly_used": kelly_used,
+        "kelly_fraction_raw": round(kelly_frac_raw, 6),
     }
     if regime is not None:
         result["regime"] = regime.lower()

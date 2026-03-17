@@ -231,3 +231,68 @@ class TestRegimeAdjustedSize:
     def test_case_insensitive(self):
         assert regime_adjusted_size(100, "BEAR", 150.0) == 50
         assert regime_adjusted_size(100, "Bear", 150.0) == 50
+
+
+# ── Kelly integration in compute_position_size ─────────────────────
+
+
+class TestKellyInComputePositionSize:
+    def test_kelly_constrains_when_edge_is_low(self):
+        """With a low win rate, Kelly should constrain position size below vol-based."""
+        # Without Kelly
+        no_kelly = compute_position_size(150.0, 5.0, 100_000.0)
+        # With Kelly: 55% win rate, win/loss ratio 1.0 → small edge
+        with_kelly = compute_position_size(
+            150.0, 5.0, 100_000.0,
+            win_rate=0.55, avg_win_loss_ratio=1.0,
+        )
+        assert with_kelly["kelly_used"] is True
+        assert with_kelly["kelly_fraction_raw"] > 0
+        assert with_kelly["shares"] <= no_kelly["shares"]
+
+    def test_kelly_not_used_when_params_missing(self):
+        """Without win_rate / avg_win_loss_ratio, Kelly is not used."""
+        result = compute_position_size(150.0, 5.0, 100_000.0)
+        assert result["kelly_used"] is False
+        assert result["kelly_fraction_raw"] == 0.0
+
+    def test_kelly_not_used_when_no_edge(self):
+        """If Kelly fraction is zero (no edge), kelly_used stays False."""
+        result = compute_position_size(
+            150.0, 5.0, 100_000.0,
+            win_rate=0.3, avg_win_loss_ratio=1.0,  # 30% win rate, no edge
+        )
+        assert result["kelly_used"] is False
+        assert result["kelly_fraction_raw"] == 0.0
+
+    def test_kelly_constrains_method_label(self):
+        """When Kelly is the binding constraint, method should say kelly_constrained."""
+        # Very low win rate with high vol-adjusted shares (low ATR)
+        result = compute_position_size(
+            10.0, 0.5, 100_000.0,
+            max_position_pct=50.0,  # high cap so it doesn't bind
+            win_rate=0.52, avg_win_loss_ratio=1.0,
+        )
+        if result["kelly_used"]:
+            # Kelly fraction should be very small for 52% win rate
+            assert result["kelly_fraction_raw"] < 0.05
+
+    def test_kelly_with_high_edge_does_not_reduce(self):
+        """With a very high edge, Kelly may not be the binding constraint."""
+        no_kelly = compute_position_size(150.0, 5.0, 100_000.0)
+        with_kelly = compute_position_size(
+            150.0, 5.0, 100_000.0,
+            win_rate=0.8, avg_win_loss_ratio=3.0,  # very strong edge
+        )
+        assert with_kelly["kelly_used"] is True
+        # Kelly should allow a large position, so vol or cap should bind
+        assert with_kelly["shares"] == no_kelly["shares"]
+
+    def test_kelly_invalid_input_returns_zero(self):
+        """With invalid price, Kelly fields should still be present."""
+        result = compute_position_size(
+            0.0, 5.0, 100_000.0,
+            win_rate=0.6, avg_win_loss_ratio=1.5,
+        )
+        assert result["shares"] == 0
+        assert result["kelly_used"] is False

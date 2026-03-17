@@ -235,7 +235,49 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         if regime is not None:
             regime = str(regime).lower()
 
-        # 4. Compute quantitative position size (regime-aware, holding-period scaled, Hurst-aware)
+        # 4. Try to load backtest hit rate for Kelly sizing
+        kelly_win_rate = None
+        kelly_avg_wl_ratio = None
+        try:
+            from ..db import get_db as _get_db
+            from ..portfolio.backtest import track_recommendation_outcomes, _BULLISH_ACTIONS
+
+            _db = _get_db()
+            recs = _db.get_recommendations(ticker=ticker, limit=500)
+            if len(recs) > 10:
+                outcomes = track_recommendation_outcomes(ticker=ticker)
+                if len(outcomes) > 10:
+                    # Compute win_rate and avg_win/loss from 90-day outcomes
+                    wins = []
+                    losses = []
+                    for o in outcomes:
+                        h_out = o.get("outcomes", {}).get(90)
+                        if h_out is None:
+                            continue
+                        ret = h_out["return_pct"]
+                        action = o["action"]
+                        # For bullish signals, positive return = win
+                        if action in _BULLISH_ACTIONS:
+                            if ret > 0:
+                                wins.append(ret)
+                            else:
+                                losses.append(abs(ret))
+                        else:
+                            if ret < 0:
+                                wins.append(abs(ret))
+                            else:
+                                losses.append(ret)
+                    total = len(wins) + len(losses)
+                    if total > 10 and losses:
+                        kelly_win_rate = len(wins) / total
+                        avg_win = sum(wins) / len(wins) if wins else 0.0
+                        avg_loss = sum(losses) / len(losses)
+                        if avg_loss > 0:
+                            kelly_avg_wl_ratio = avg_win / avg_loss
+        except Exception as exc:
+            logger.warning("Kelly backtest lookup failed (non-fatal): %s", exc)
+
+        # 5. Compute quantitative position size (regime-aware, holding-period scaled, Hurst-aware, Kelly-aware)
         sizing_result = compute_position_size(
             price=price,
             atr_14=atr_14,
@@ -244,9 +286,11 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
             regime=regime,
             holding_days=holding_days,
             hurst=hurst,
+            win_rate=kelly_win_rate,
+            avg_win_loss_ratio=kelly_avg_wl_ratio,
         )
 
-        # 5. Correlation check against existing holdings
+        # 6. Correlation check against existing holdings
         existing_tickers = []
         positions = ps.get("positions", {})
         if isinstance(positions, dict):
@@ -272,17 +316,19 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                         regime=regime,
                         holding_days=holding_days,
                         hurst=hurst,
+                        win_rate=kelly_win_rate,
+                        avg_win_loss_ratio=kelly_avg_wl_ratio,
                     )
             except Exception as exc:
                 logger.warning("Correlation check failed (non-fatal): %s", exc)
                 correlation_details = {"error": str(exc)}
 
-        # 6. Override LLM's hallucinated max_position_size in risk_assessment
+        # 7. Override LLM's hallucinated max_position_size in risk_assessment
         ra = gs.get("risk_assessment") or {}
         ra["max_position_size"] = float(sizing_result["shares"])
         warnings = ra.get("warnings", [])
 
-        # 7. Regime-based approval / warnings
+        # 8. Regime-based approval / warnings
         if regime == "crisis":
             ra["approved"] = False
             warnings.append(
@@ -293,7 +339,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                 "BEAR regime \u2014 reduced position sizes applied"
             )
 
-        # 8. If correlation check fails, reject the trade
+        # 9. If correlation check fails, reject the trade
         if not correlation_ok:
             ra["approved"] = False
             warnings.append(
@@ -304,7 +350,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         ra["warnings"] = warnings
         gs["risk_assessment"] = ra
 
-        # 9. Portfolio-level CVaR check (wrapped in try/except — non-blocking)
+        # 10. Portfolio-level CVaR check (wrapped in try/except — non-blocking)
         portfolio_cvar = None
         new_portfolio_cvar = None
         cvar_warning = False
@@ -386,7 +432,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         except Exception as exc:
             logger.warning("Portfolio CVaR check failed (non-fatal): %s", exc)
 
-        # 10. Store quantitative results in state
+        # 11. Store quantitative results in state
         gs["quantitative_risk"] = {
             "sizing": sizing_result,
             "regime": regime,
@@ -396,6 +442,8 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
             "portfolio_cvar": portfolio_cvar,
             "new_portfolio_cvar": new_portfolio_cvar,
             "cvar_warning": cvar_warning,
+            "kelly_used": sizing_result.get("kelly_used", False),
+            "kelly_fraction_raw": sizing_result.get("kelly_fraction_raw", 0.0),
         }
 
     except Exception as exc:

@@ -146,6 +146,68 @@ def stop_loss_check() -> None:
     console.print()
 
 
+@stop_loss_app.command("trailing")
+def stop_loss_trailing() -> None:
+    """Update ATR-based trailing stops — ratchets stops up when prices rise."""
+    from ..portfolio.stop_loss import StopLossMonitor
+
+    monitor = StopLossMonitor()
+
+    with console.status("[bold cyan]Updating trailing stops...", spinner="dots"):
+        results = monitor.update_trailing_stops()
+
+    if not results:
+        console.print("[dim]No trailing stops are configured. Use 'tm stop-loss set-trailing TICKER' to set one.[/dim]")
+        raise typer.Exit()
+
+    table = Table(title="Trailing Stop Update", show_header=True, header_style="bold magenta")
+    table.add_column("Ticker", style="cyan", min_width=8)
+    table.add_column("Old Stop", justify="right")
+    table.add_column("New Stop", justify="right")
+    table.add_column("Ratcheted", min_width=10)
+
+    ratcheted_count = 0
+    for r in results:
+        ratcheted = r["ratcheted"]
+        if ratcheted:
+            ratcheted_count += 1
+        status = Text("YES", style="bold green") if ratcheted else Text("no", style="dim")
+        table.add_row(
+            r["ticker"],
+            f"${r['old_stop']:,.2f}",
+            f"${r['new_stop']:,.2f}",
+            status,
+        )
+
+    console.print(table)
+    if ratcheted_count:
+        console.print(f"[green]{ratcheted_count} stop(s) ratcheted up.[/green]")
+    else:
+        console.print("[dim]No stops needed ratcheting.[/dim]")
+    console.print()
+
+
+@stop_loss_app.command("set-trailing")
+def stop_loss_set_trailing(
+    ticker: str = typer.Argument(..., help="Ticker symbol"),
+    multiplier: float = typer.Option(2.5, "--multiplier", "-m", help="ATR multiplier (default: 2.5)"),
+) -> None:
+    """Set an ATR-based trailing stop for a position."""
+    from ..portfolio.stop_loss import StopLossMonitor
+
+    ticker = ticker.upper()
+    monitor = StopLossMonitor()
+
+    with console.status(f"[bold cyan]Setting trailing stop for {ticker}...", spinner="dots"):
+        try:
+            stop_price = monitor.set_trailing_stop(ticker, atr_multiplier=multiplier)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(1)
+
+    console.print(f"[green]Trailing stop for {ticker} set at ${stop_price:,.2f} (ATR x{multiplier}).[/green]")
+
+
 @stop_loss_app.command("auto")
 def stop_loss_auto() -> None:
     """Auto-set stops for positions that don't have one (default 8% below avg cost)."""
