@@ -853,3 +853,74 @@ def pairs_cmd(
     table.add_row("Observations", str(result.n_observations))
 
     console.print(table)
+
+
+@quant_app.command("sectors")
+def sectors_cmd(
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days"),
+) -> None:
+    """Analyze sector rotation — leaders vs laggards across market sectors."""
+    import yfinance as yf
+    from datetime import datetime, timedelta
+    from ..quant.sector_rotation import SECTOR_ETFS, analyze_sectors
+
+    tickers = list(SECTOR_ETFS.keys()) + ["SPY"]
+
+    with console.status("[bold cyan]Fetching sector ETF data...", spinner="dots"):
+        try:
+            end = datetime.now()
+            start = end - timedelta(days=int(lookback * 1.5))
+            hist = yf.download(
+                tickers,
+                start=start.strftime("%Y-%m-%d"),
+                end=end.strftime("%Y-%m-%d"),
+                progress=False,
+            )["Close"].dropna()
+        except Exception as exc:
+            console.print(f"[red]Error fetching data:[/red] {exc}")
+            raise typer.Exit(1)
+
+    if len(hist) < 30:
+        console.print("[red]Insufficient data.[/red]")
+        raise typer.Exit(1)
+
+    price_data = {}
+    for t in SECTOR_ETFS:
+        if t in hist.columns:
+            price_data[t] = hist[t].values
+
+    benchmark = hist["SPY"].values if "SPY" in hist.columns else None
+
+    with console.status("[bold cyan]Analyzing sectors...", spinner="dots"):
+        result = analyze_sectors(price_data, benchmark_prices=benchmark)
+
+    table = Table(title=f"Sector Rotation Analysis ({result.analysis_date})")
+    table.add_column("Rank", style="dim", width=4)
+    table.add_column("Sector", style="cyan", min_width=10)
+    table.add_column("ETF", width=5)
+    table.add_column("1M", justify="right")
+    table.add_column("3M", justify="right")
+    table.add_column("6M", justify="right")
+    table.add_column("Rel.Str", justify="right")
+    table.add_column("Trend", justify="right")
+    table.add_column("Score", justify="right")
+
+    for s in result.sectors:
+        rank_style = "bold green" if s.rank <= 3 else ("bold red" if s.rank > result.n_sectors - 3 else "white")
+        ret_style = lambda v: "green" if v > 0.01 else ("red" if v < -0.01 else "dim")
+
+        table.add_row(
+            Text(str(s.rank), style=rank_style),
+            s.name,
+            s.ticker,
+            Text(f"{s.momentum_1m:+.1%}", style=ret_style(s.momentum_1m)),
+            Text(f"{s.momentum_3m:+.1%}", style=ret_style(s.momentum_3m)),
+            Text(f"{s.momentum_6m:+.1%}", style=ret_style(s.momentum_6m)),
+            Text(f"{s.relative_strength:+.1%}", style=ret_style(s.relative_strength)),
+            f"{s.trend_score:.0f}/3",
+            Text(f"{s.composite_score:+.4f}", style=rank_style),
+        )
+
+    console.print(table)
+    if result.benchmark_return_3m:
+        console.print(f"[dim]SPY 3M return: {result.benchmark_return_3m:+.1%}[/dim]")
