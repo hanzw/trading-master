@@ -189,7 +189,8 @@ def test_quant_help():
     # Should list all quant commands
     for cmd in ["monte-carlo", "dcf", "bl", "hrp", "risk-parity",
                 "evt", "regime", "markowitz", "capm", "garch",
-                "ff5", "pairs", "sectors", "compare", "stress-test"]:
+                "ff5", "pairs", "sectors", "compare", "stress-test",
+                "mtf", "dashboard"]:
         assert cmd in result.output, f"Missing quant command: {cmd}"
 
 
@@ -213,6 +214,8 @@ def test_quant_help():
     "pairs",
     "sectors",
     "compare",
+    "mtf",
+    "dashboard",
 ])
 def test_quant_subcommand_help(cmd):
     """Each quant subcommand should have working --help."""
