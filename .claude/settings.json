@@ -1,0 +1,10 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "bash C:/Users/Hanzhang/.claude/plugins/ralph-wiggum/hooks/stop-hook.sh"
+      }
+    ]
+  }
+}
