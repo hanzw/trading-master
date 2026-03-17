@@ -1,4 +1,4 @@
-"""CLI commands for quantitative analysis (Monte Carlo, DCF, Black-Litterman, HRP, Risk Parity, EVT)."""
+"""CLI commands for quantitative analysis — all 11 quant modules exposed."""
 
 from __future__ import annotations
 
@@ -559,3 +559,229 @@ def regime_cmd(
                   f"(confidence: {result.current_probs[result.current_regime]:.0%})")
     console.print(f"[dim]Converged: {result.converged} | Iterations: {result.n_iterations} | "
                   f"Log-likelihood: {result.log_likelihood:.1f}[/dim]")
+
+
+@quant_app.command("markowitz")
+def markowitz_cmd(
+    tickers: str = typer.Option(
+        "",
+        "--tickers",
+        "-t",
+        help="Comma-separated tickers (default: current portfolio holdings)",
+    ),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days for covariance"),
+    frontier_points: int = typer.Option(15, "--points", "-n", help="Efficient frontier points"),
+) -> None:
+    """Run Markowitz Mean-Variance Optimization: min-variance, max-Sharpe, efficient frontier."""
+    from ..portfolio.tracker import PortfolioTracker
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.markowitz import minimum_variance_portfolio, max_sharpe_portfolio, efficient_frontier
+
+    tracker = PortfolioTracker()
+    state = tracker.get_state()
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    elif state.positions:
+        ticker_list = sorted(state.positions.keys())
+    else:
+        console.print("[red]No tickers specified and no portfolio positions found.[/red]")
+        raise typer.Exit(1)
+
+    if len(ticker_list) < 2:
+        console.print("[red]Markowitz requires at least 2 tickers.[/red]")
+        raise typer.Exit(1)
+
+    with console.status("[bold cyan]Fetching returns...", spinner="dots"):
+        returns_array, valid_tickers = fetch_returns(ticker_list, lookback_days=lookback)
+
+    if returns_array is None or len(valid_tickers) < 2:
+        console.print("[red]Could not fetch sufficient return data.[/red]")
+        raise typer.Exit(1)
+
+    mu = returns_array.mean(axis=0) * 252
+    cov_matrix = np.cov(returns_array, rowvar=False) * 252
+
+    with console.status("[bold cyan]Optimizing...", spinner="dots"):
+        min_var = minimum_variance_portfolio(cov_matrix, mu)
+        tangency = max_sharpe_portfolio(mu, cov_matrix)
+        frontier = efficient_frontier(mu, cov_matrix, n_points=frontier_points)
+
+    # Key portfolios table
+    table = Table(title="Markowitz Optimization")
+    table.add_column("Ticker", style="cyan")
+    table.add_column("Min-Var %", justify="right")
+    table.add_column("Max-Sharpe %", justify="right")
+
+    for i, t in enumerate(valid_tickers):
+        table.add_row(
+            t,
+            f"{min_var.weights[i]*100:.1f}%",
+            f"{tangency.weights[i]*100:.1f}%",
+        )
+    table.add_row("", "", "")
+    table.add_row("[bold]Return", f"{min_var.expected_return:.2%}", f"{tangency.expected_return:.2%}")
+    table.add_row("[bold]Volatility", f"{min_var.volatility:.2%}", f"{tangency.volatility:.2%}")
+    table.add_row("[bold]Sharpe", f"{min_var.sharpe_ratio:.3f}", f"{tangency.sharpe_ratio:.3f}")
+    console.print(table)
+
+    # Frontier summary
+    if frontier:
+        console.print(f"\n[dim]Efficient frontier: {len(frontier)} points, "
+                      f"vol range [{frontier[0].volatility:.2%} — {frontier[-1].volatility:.2%}][/dim]")
+
+
+@quant_app.command("capm")
+def capm_cmd(
+    ticker: str = typer.Argument(..., help="Stock ticker symbol"),
+    benchmark: str = typer.Option("SPY", "--benchmark", "-b", help="Market benchmark"),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days"),
+) -> None:
+    """Run CAPM regression: alpha, beta, R-squared vs benchmark."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.capm import capm_regression
+
+    ticker = ticker.upper()
+    benchmark = benchmark.upper()
+
+    with console.status(f"[bold cyan]Fetching {ticker} + {benchmark}...", spinner="dots"):
+        returns_array, valid = fetch_returns([ticker, benchmark], lookback_days=lookback)
+
+    if returns_array is None or len(valid) < 2:
+        console.print(f"[red]Could not fetch data for {ticker} and {benchmark}.[/red]")
+        raise typer.Exit(1)
+
+    # Simple excess returns (Rf ≈ 0 for daily)
+    asset_ret = returns_array[:, 0]
+    market_ret = returns_array[:, 1]
+
+    result = capm_regression(asset_ret, market_ret, ticker=ticker)
+
+    table = Table(title=f"CAPM — {ticker} vs {benchmark}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+
+    alpha_ann = result.alpha * 252
+    alpha_style = "green" if alpha_ann > 0 else "red"
+
+    table.add_row("Beta", f"{result.beta:.3f}")
+    table.add_row("Alpha (daily)", f"{result.alpha:.6f}")
+    table.add_row("Alpha (annualized)", Text(f"{alpha_ann:.2%}", style=alpha_style))
+    table.add_row("R-squared", f"{result.r_squared:.3f}")
+    table.add_row("Alpha t-stat", f"{result.alpha_t_stat:.2f}")
+    table.add_row("Beta t-stat", f"{result.beta_t_stat:.2f}")
+    table.add_row("Residual Std", f"{result.residual_std:.4f}")
+    table.add_row("Observations", str(result.n_observations))
+
+    sig = "Yes" if abs(result.alpha_t_stat) > 2.0 else "No"
+    table.add_row("Alpha significant?", Text(sig, style="green" if sig == "Yes" else "dim"))
+
+    console.print(table)
+
+
+@quant_app.command("garch")
+def garch_cmd(
+    ticker: str = typer.Argument(..., help="Stock ticker symbol"),
+    lookback: int = typer.Option(504, "--lookback", help="Lookback days (default 2yr)"),
+    forecast_days: int = typer.Option(10, "--forecast", "-f", help="Forecast horizon (days)"),
+) -> None:
+    """Fit GARCH(1,1) volatility model and forecast future volatility."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.garch import fit_garch, forecast_volatility
+
+    ticker = ticker.upper()
+
+    with console.status(f"[bold cyan]Fetching {ticker}...", spinner="dots"):
+        returns_array, valid = fetch_returns([ticker], lookback_days=lookback)
+
+    if returns_array is None or len(valid) == 0:
+        console.print("[red]Could not fetch return data.[/red]")
+        raise typer.Exit(1)
+
+    returns = returns_array[:, 0]
+
+    with console.status("[bold cyan]Fitting GARCH(1,1)...", spinner="dots"):
+        result = fit_garch(returns)
+        forecasts = forecast_volatility(result, returns, horizon=forecast_days)
+
+    table = Table(title=f"GARCH(1,1) — {ticker}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+
+    table.add_row("Omega", f"{result.omega:.2e}")
+    table.add_row("Alpha (shock)", f"{result.alpha:.4f}")
+    table.add_row("Beta (persistence)", f"{result.beta:.4f}")
+    table.add_row("Persistence (a+b)", f"{result.persistence:.4f}")
+    table.add_row("Long-run Vol (ann.)", f"{np.sqrt(result.long_run_variance * 252):.2%}")
+    table.add_row("Current Vol (ann.)", f"{result.conditional_volatility[-1] * np.sqrt(252):.2%}")
+    table.add_row("Converged", str(result.converged))
+
+    console.print(table)
+
+    # Forecast table
+    fc_table = Table(title=f"Volatility Forecast ({forecast_days}d)")
+    fc_table.add_column("Day", style="cyan", justify="right")
+    fc_table.add_column("Ann. Vol", style="yellow", justify="right")
+
+    for d, vol in enumerate(forecasts, 1):
+        fc_table.add_row(f"+{d}", f"{vol:.2%}")
+
+    console.print(fc_table)
+
+
+@quant_app.command("ff5")
+def ff5_cmd(
+    ticker: str = typer.Argument(..., help="Stock ticker symbol"),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days"),
+) -> None:
+    """Run Fama-French 5-factor decomposition (uses synthetic factors as proxy)."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.fama_french import ff5_decompose, generate_synthetic_factors, attribute_returns
+
+    ticker = ticker.upper()
+
+    with console.status(f"[bold cyan]Fetching {ticker}...", spinner="dots"):
+        returns_array, valid = fetch_returns([ticker], lookback_days=lookback)
+
+    if returns_array is None or len(valid) == 0:
+        console.print("[red]Could not fetch return data.[/red]")
+        raise typer.Exit(1)
+
+    asset_ret = returns_array[:, 0]
+    n_days = len(asset_ret)
+
+    # Use synthetic factors as proxy (real FF data requires Ken French's site)
+    factors, rf = generate_synthetic_factors(n_days=n_days, seed=42)
+    excess_ret = asset_ret - rf
+
+    result = ff5_decompose(excess_ret, factors, ticker=ticker)
+
+    factor_names = ["Mkt-RF", "SMB", "HML", "RMW", "CMA"]
+    table = Table(title=f"Fama-French 5-Factor — {ticker}")
+    table.add_column("Factor", style="cyan")
+    table.add_column("Beta", justify="right")
+    table.add_column("t-stat", justify="right")
+
+    alpha_ann = result.alpha * 252
+    a_style = "green" if alpha_ann > 0 else "red"
+    table.add_row("Alpha (ann.)", Text(f"{alpha_ann:.2%}", style=a_style),
+                  f"{result.t_stats[0]:.2f}")
+
+    for i, name in enumerate(factor_names):
+        b = result.betas[i]
+        t = result.t_stats[i + 1]
+        b_style = "green" if b > 0.1 else ("red" if b < -0.1 else "dim")
+        table.add_row(name, Text(f"{b:.3f}", style=b_style), f"{t:.2f}")
+
+    table.add_row("", "", "")
+    table.add_row("R-squared", f"{result.r_squared:.3f}", "")
+    table.add_row("Residual Std", f"{result.residual_std:.4f}", "")
+
+    console.print(table)
+
+    # Attribution
+    attr = attribute_returns(result)
+    console.print("\n[dim]Return attribution (annualized):[/dim]")
+    for factor, contrib in attr.items():
+        style = "green" if contrib > 0.005 else ("red" if contrib < -0.005 else "dim")
+        console.print(f"  [{style}]{factor}: {contrib:.2%}[/]")
