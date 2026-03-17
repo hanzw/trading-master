@@ -36,6 +36,7 @@ from .stop_loss import stop_loss_app  # noqa: E402
 from .allocation import allocation_app  # noqa: E402
 from .analyze import register_commands  # noqa: E402
 from .watchlist import watchlist_app, register_alerts_command  # noqa: E402
+from .report import register_report_command  # noqa: E402
 
 app.add_typer(portfolio_app, name="portfolio")
 app.add_typer(action_app, name="action")
@@ -45,3 +46,4 @@ app.add_typer(allocation_app, name="allocation")
 app.add_typer(watchlist_app, name="watchlist")
 register_commands(app)  # analyze, review, backtest, macro are top-level
 register_alerts_command(app)  # top-level 'alerts' command
+register_report_command(app)  # top-level 'report' command

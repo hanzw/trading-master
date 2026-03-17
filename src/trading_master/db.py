@@ -76,6 +76,9 @@ class Database:
             self._conn.row_factory = sqlite3.Row
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.executescript(_CREATE_SQL)
+            # Run schema migrations after initial table creation
+            from .db_migrations import run_migrations
+            run_migrations(self)
         return self._conn
 
     def close(self) -> None:
