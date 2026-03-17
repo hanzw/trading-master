@@ -84,12 +84,12 @@ def _build_report_text() -> str:
         lines.append(f"Regime:           {macro.regime.value.upper()}")
         if macro.vix is not None:
             lines.append(f"VIX:              {macro.vix:.1f}")
-        if macro.us_10y_yield is not None:
-            lines.append(f"US 10Y Yield:     {macro.us_10y_yield:.2f}%")
-        if macro.us_2y_yield is not None:
-            lines.append(f"US 2Y Yield:      {macro.us_2y_yield:.2f}%")
-        if macro.us_10y_yield is not None and macro.us_2y_yield is not None:
-            spread = macro.us_10y_yield - macro.us_2y_yield
+        if macro.us_10yr_yield is not None:
+            lines.append(f"US 10Y Yield:     {macro.us_10yr_yield:.2f}%")
+        if macro.us_2yr_yield is not None:
+            lines.append(f"US 2Y Yield:      {macro.us_2yr_yield:.2f}%")
+        if macro.us_10yr_yield is not None and macro.us_2yr_yield is not None:
+            spread = macro.us_10yr_yield - macro.us_2yr_yield
             lines.append(f"Yield Spread:     {spread:+.2f}%")
             if spread < 0:
                 lines.append("                  ** INVERTED YIELD CURVE **")
