@@ -75,7 +75,13 @@ def _mock_config():
 @pytest.mark.asyncio
 async def test_bull_regime_no_warnings():
     gs = _make_graph_state(regime="bull")
-    result = await quantitative_risk_node(gs)
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result = await quantitative_risk_node(gs)
+
     qr = result["quantitative_risk"]
     ra = result["risk_assessment"]
 
@@ -134,8 +140,12 @@ async def test_sideways_regime_reduces_size():
     gs_bull = _make_graph_state(regime="bull")
     gs_side = _make_graph_state(regime="sideways")
 
-    result_bull = await quantitative_risk_node(gs_bull)
-    result_side = await quantitative_risk_node(gs_side)
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result_bull = await quantitative_risk_node(gs_bull)
+        result_side = await quantitative_risk_node(gs_side)
 
     bull_shares = result_bull["quantitative_risk"]["sizing"]["shares"]
     side_shares = result_side["quantitative_risk"]["sizing"]["shares"]

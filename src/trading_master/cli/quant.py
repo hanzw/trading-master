@@ -924,3 +924,74 @@ def sectors_cmd(
     console.print(table)
     if result.benchmark_return_3m:
         console.print(f"[dim]SPY 3M return: {result.benchmark_return_3m:+.1%}[/dim]")
+
+
+@quant_app.command("compare")
+def compare_cmd(
+    tickers: str = typer.Option(
+        "",
+        "--tickers",
+        "-t",
+        help="Comma-separated tickers (default: current portfolio holdings)",
+    ),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days for covariance"),
+) -> None:
+    """Compare Markowitz, HRP, and Risk Parity allocations side by side."""
+    from ..portfolio.tracker import PortfolioTracker
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.compare import compare_allocations
+
+    tracker = PortfolioTracker()
+    state = tracker.get_state()
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    elif state.positions:
+        ticker_list = sorted(state.positions.keys())
+    else:
+        console.print("[red]No tickers specified and no portfolio positions found.[/red]")
+        console.print("Use: tm quant compare --tickers AAPL,MSFT,GOOGL,TLT")
+        raise typer.Exit(1)
+
+    if len(ticker_list) < 2:
+        console.print("[red]Comparison requires at least 2 tickers.[/red]")
+        raise typer.Exit(1)
+
+    with console.status("[bold cyan]Fetching returns...", spinner="dots"):
+        returns_array, valid_tickers = fetch_returns(ticker_list, lookback_days=lookback)
+
+    if returns_array is None or len(valid_tickers) < 2:
+        console.print("[red]Could not fetch sufficient return data.[/red]")
+        raise typer.Exit(1)
+
+    mu = returns_array.mean(axis=0) * 252
+    cov_matrix = np.cov(returns_array, rowvar=False) * 252
+
+    with console.status("[bold cyan]Running 3 optimizers...", spinner="dots"):
+        result = compare_allocations(mu, cov_matrix, tickers=list(valid_tickers))
+
+    table = Table(title="Portfolio Optimizer Comparison")
+    table.add_column("Ticker", style="cyan", min_width=8)
+    table.add_column("Markowitz %", justify="right")
+    table.add_column("HRP %", justify="right")
+    table.add_column("Risk Parity %", justify="right")
+    table.add_column("Consensus %", justify="right", style="bold")
+    table.add_column("Dispersion", justify="right")
+
+    for row in result.weight_table:
+        disp = row["dispersion"]
+        disp_style = "green" if disp < 0.05 else ("yellow" if disp < 0.10 else "red")
+        table.add_row(
+            row["ticker"],
+            f"{row['markowitz']*100:.1f}%",
+            f"{row['hrp']*100:.1f}%",
+            f"{row['risk_parity']*100:.1f}%",
+            f"{row['consensus']*100:.1f}%",
+            Text(f"{disp:.3f}", style=disp_style),
+        )
+
+    console.print(table)
+    console.print(f"\n[bold green]Highest consensus:[/] {result.min_dispersion_ticker} "
+                  f"(dispersion={result.dispersion[list(valid_tickers).index(result.min_dispersion_ticker)]:.3f})")
+    console.print(f"[bold red]Most disagreement:[/] {result.max_dispersion_ticker} "
+                  f"(dispersion={result.dispersion[list(valid_tickers).index(result.max_dispersion_ticker)]:.3f})")
