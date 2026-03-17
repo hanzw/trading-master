@@ -1,4 +1,4 @@
-"""CLI commands for quantitative analysis (Monte Carlo, DCF, Black-Litterman, HRP)."""
+"""CLI commands for quantitative analysis (Monte Carlo, DCF, Black-Litterman, HRP, Risk Parity, EVT)."""
 
 from __future__ import annotations
 
@@ -442,3 +442,60 @@ def risk_parity_cmd(
     console.print(wt_table)
     console.print(f"\n[dim]Portfolio volatility: {result.portfolio_volatility:.2%}[/dim]")
     console.print()
+
+
+@quant_app.command("evt")
+def evt_cmd(
+    ticker: str = typer.Argument(..., help="Stock ticker symbol"),
+    lookback: int = typer.Option(504, "--lookback", help="Lookback days (default 2yr)"),
+    threshold: float = typer.Option(0.90, "--threshold", "-u", help="POT threshold quantile"),
+) -> None:
+    """Run Extreme Value Theory tail risk analysis for a ticker."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.evt import evt_tail_risk
+
+    ticker = ticker.upper()
+    console.print(f"[bold]Running EVT tail risk analysis for {ticker}...[/bold]")
+
+    try:
+        returns_array, valid = fetch_returns([ticker], lookback_days=lookback)
+    except Exception as exc:
+        console.print(f"[red]Error fetching data:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if returns_array is None or len(valid) == 0:
+        console.print("[red]Could not fetch return data.[/red]")
+        raise typer.Exit(1)
+
+    returns = returns_array[:, 0]
+
+    try:
+        result = evt_tail_risk(returns, threshold_quantile=threshold)
+    except Exception as exc:
+        console.print(f"[red]EVT analysis failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    # Tail type styling
+    tail_style = {"heavy": "bold red", "exponential": "yellow", "bounded": "green"}
+
+    table = Table(title=f"EVT Tail Risk — {ticker}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", style="green", justify="right")
+
+    table.add_row("Tail Type", Text(result.tail_type.upper(), style=tail_style.get(result.tail_type, "white")))
+    table.add_row("Shape (xi)", f"{result.shape:.4f}")
+    table.add_row("Scale (sigma)", f"{result.scale:.4f}")
+    table.add_row("Threshold", f"{result.threshold:.4f}")
+    table.add_row("Exceedances", f"{result.n_exceedances} / {result.n_total} ({result.exceedance_rate:.1%})")
+    table.add_row("", "")
+    table.add_row("VaR 95%", f"{result.var_95:.2%}")
+    table.add_row("VaR 99%", f"{result.var_99:.2%}")
+    table.add_row("CVaR 95%", f"{result.cvar_95:.2%}")
+    table.add_row("CVaR 99%", f"{result.cvar_99:.2%}")
+
+    if result.ks_pvalue is not None:
+        ks_style = "green" if result.ks_pvalue > 0.05 else "red"
+        table.add_row("", "")
+        table.add_row("KS p-value", Text(f"{result.ks_pvalue:.4f}", style=ks_style))
+
+    console.print(table)
