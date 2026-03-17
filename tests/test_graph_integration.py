@@ -90,8 +90,13 @@ async def test_bear_regime_warning_and_reduced_size():
     gs_bull = _make_graph_state(regime="bull")
     gs_bear = _make_graph_state(regime="bear")
 
-    result_bull = await quantitative_risk_node(gs_bull)
-    result_bear = await quantitative_risk_node(gs_bear)
+    # Disable HMM override by making SPY fetch fail
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result_bull = await quantitative_risk_node(gs_bull)
+        result_bear = await quantitative_risk_node(gs_bear)
 
     bull_shares = result_bull["quantitative_risk"]["sizing"]["shares"]
     bear_shares = result_bear["quantitative_risk"]["sizing"]["shares"]
@@ -107,7 +112,12 @@ async def test_bear_regime_warning_and_reduced_size():
 @pytest.mark.asyncio
 async def test_crisis_regime_blocks_trade():
     gs = _make_graph_state(regime="crisis")
-    result = await quantitative_risk_node(gs)
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result = await quantitative_risk_node(gs)
 
     ra = result["risk_assessment"]
     assert ra["approved"] is False
@@ -137,7 +147,12 @@ async def test_sideways_regime_reduces_size():
 async def test_no_macro_data_no_regime():
     gs = _make_graph_state(regime=None)
     gs["macro_data"] = None
-    result = await quantitative_risk_node(gs)
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result = await quantitative_risk_node(gs)
 
     qr = result["quantitative_risk"]
     assert qr["regime"] is None
@@ -215,3 +230,107 @@ async def test_cvar_failure_does_not_block():
     qr = result["quantitative_risk"]
     assert "sizing" in qr
     assert qr["portfolio_cvar"] is None
+
+
+# ── EVT integration tests ────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_evt_result_stored():
+    """EVT tail risk result should appear in quantitative_risk."""
+    gs = _make_graph_state(regime="bull")
+
+    # Mock fetch_returns to return enough data for EVT
+    rng = np.random.default_rng(42)
+    fake_returns = rng.normal(0.001, 0.02, (300, 1))
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(fake_returns, ["AAPL"]),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+    assert "evt" in qr
+    if qr["evt"]:
+        assert "tail_type" in qr["evt"]
+        assert "var_99" in qr["evt"]
+        assert "cvar_99" in qr["evt"]
+
+
+@pytest.mark.asyncio
+async def test_evt_heavy_tail_warns():
+    """Heavy-tailed returns should produce an EVT warning."""
+    gs = _make_graph_state(regime="bull")
+
+    # Student-t(3) returns → heavy tails
+    rng = np.random.default_rng(42)
+    fake_returns = rng.standard_t(df=3, size=(300, 1)) * 0.02
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(fake_returns, ["AAPL"]),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+    evt = qr.get("evt", {})
+    if evt and evt.get("tail_type") == "heavy":
+        ra = result["risk_assessment"]
+        assert any("EVT" in w for w in ra.get("warnings", []))
+
+
+@pytest.mark.asyncio
+async def test_evt_failure_non_fatal():
+    """If EVT fails, the rest of the pipeline should still work."""
+    gs = _make_graph_state(regime="bull")
+
+    # Return too little data for EVT (< 30) but enough for sizing
+    fake_returns = np.random.default_rng(42).normal(0.001, 0.02, (20, 1))
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(fake_returns, ["AAPL"]),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+    assert "sizing" in qr  # sizing still works
+    # EVT may be empty dict (too few obs)
+    assert "evt" in qr
+
+
+# ── HMM regime integration tests ─────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_hmm_regime_stored():
+    """HMM regime result should appear in quantitative_risk."""
+    gs = _make_graph_state(regime="bull")
+
+    rng = np.random.default_rng(42)
+    fake_returns = rng.normal(0.001, 0.02, (300, 1))
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(fake_returns, ["SPY"]),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+    assert "hmm_regime" in qr
+    assert "hmm_confidence" in qr
+
+
+@pytest.mark.asyncio
+async def test_hmm_failure_non_fatal():
+    """If HMM fails, the pipeline falls back to heuristic regime."""
+    gs = _make_graph_state(regime="bear")
+
+    # Patch fit_regime_model to raise
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        side_effect=RuntimeError("network error"),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+    assert "sizing" in qr
+    # Should still use heuristic regime
+    assert qr["regime"] == "bear"

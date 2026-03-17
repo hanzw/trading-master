@@ -484,10 +484,71 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         except Exception as exc:
             logger.warning("Portfolio CVaR check failed (non-fatal): %s", exc)
 
-        # 11. Store quantitative results in state
+        # 11. EVT tail risk analysis on the ticker
+        evt_result: dict[str, Any] = {}
+        try:
+            from ..quant.evt import evt_tail_risk
+            ticker_returns = fetch_returns([ticker], lookback_days=504)
+            if ticker_returns[0] is not None and len(ticker_returns[1]) > 0:
+                ret_array = ticker_returns[0][:, 0]
+                if len(ret_array) >= 100:
+                    evt = evt_tail_risk(ret_array)
+                    evt_result = {
+                        "tail_type": evt.tail_type,
+                        "shape": evt.shape,
+                        "var_99": evt.var_99,
+                        "cvar_99": evt.cvar_99,
+                    }
+                    if evt.is_heavy_tailed:
+                        warnings.append(
+                            f"EVT: {ticker} has heavy-tailed returns "
+                            f"(shape={evt.shape:.3f}, CVaR99={evt.cvar_99:.2%})"
+                        )
+                        ra["warnings"] = warnings
+                        gs["risk_assessment"] = ra
+        except Exception as exc:
+            logger.warning("EVT tail risk check failed (non-fatal): %s", exc)
+
+        # 12. HMM regime detection (augments heuristic regime)
+        hmm_regime: str | None = None
+        hmm_confidence: float = 0.0
+        try:
+            from ..quant.regime import fit_regime_model
+            spy_returns = fetch_returns(["SPY"], lookback_days=504)
+            if spy_returns[0] is not None and len(spy_returns[1]) > 0:
+                spy_ret = spy_returns[0][:, 0]
+                if len(spy_ret) >= 100:
+                    hmm = fit_regime_model(spy_ret, n_regimes=3)
+                    hmm_regime = hmm.current_label
+                    hmm_confidence = float(hmm.current_probs[hmm.current_regime])
+                    # Override heuristic regime if HMM is confident
+                    if hmm_confidence > 0.7 and hmm_regime != regime:
+                        logger.info(
+                            "HMM regime override: %s -> %s (confidence=%.0f%%)",
+                            regime, hmm_regime, hmm_confidence * 100,
+                        )
+                        regime = hmm_regime
+                        # Re-check crisis/bear warnings with updated regime
+                        if regime == "crisis" and ra.get("approved", True):
+                            ra["approved"] = False
+                            warnings.append(
+                                "HMM: CRISIS regime detected — new equity positions not recommended"
+                            )
+                        elif regime == "bear" and not any("BEAR" in w for w in warnings):
+                            warnings.append(
+                                "HMM: BEAR regime detected — reduced position sizes applied"
+                            )
+                        ra["warnings"] = warnings
+                        gs["risk_assessment"] = ra
+        except Exception as exc:
+            logger.warning("HMM regime detection failed (non-fatal): %s", exc)
+
+        # 13. Store quantitative results in state
         gs["quantitative_risk"] = {
             "sizing": sizing_result,
             "regime": regime,
+            "hmm_regime": hmm_regime,
+            "hmm_confidence": hmm_confidence,
             "correlation_ok": correlation_ok,
             "avg_correlation": avg_correlation,
             "correlation_details": correlation_details,
@@ -496,6 +557,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
             "cvar_warning": cvar_warning,
             "kelly_used": sizing_result.get("kelly_used", False),
             "kelly_fraction_raw": sizing_result.get("kelly_fraction_raw", 0.0),
+            "evt": evt_result,
         }
 
     except Exception as exc:
