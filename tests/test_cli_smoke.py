@@ -177,3 +177,123 @@ def test_portfolio_help():
 def test_risk_help():
     result = runner.invoke(app, ["risk", "--help"])
     assert result.exit_code == 0
+
+
+# ---------------------------------------------------------------------------
+# Test 6: quant --help lists all subcommands
+# ---------------------------------------------------------------------------
+
+def test_quant_help():
+    result = runner.invoke(app, ["quant", "--help"])
+    assert result.exit_code == 0
+    # Should list all quant commands
+    for cmd in ["monte-carlo", "dcf", "bl", "hrp", "risk-parity",
+                "evt", "regime", "markowitz", "capm", "garch",
+                "ff5", "pairs", "sectors", "compare", "stress-test"]:
+        assert cmd in result.output, f"Missing quant command: {cmd}"
+
+
+# ---------------------------------------------------------------------------
+# Test 7-21: Individual quant command --help (ensures imports work)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("cmd", [
+    "monte-carlo",
+    "stress-test",
+    "dcf",
+    "bl",
+    "hrp",
+    "risk-parity",
+    "evt",
+    "regime",
+    "markowitz",
+    "capm",
+    "garch",
+    "ff5",
+    "pairs",
+    "sectors",
+    "compare",
+])
+def test_quant_subcommand_help(cmd):
+    """Each quant subcommand should have working --help."""
+    result = runner.invoke(app, ["quant", cmd, "--help"])
+    assert result.exit_code == 0, f"quant {cmd} --help failed: {result.output}"
+
+
+# ---------------------------------------------------------------------------
+# Test 22: quant monte-carlo runs with defaults (no network)
+# ---------------------------------------------------------------------------
+
+def test_quant_monte_carlo_runs():
+    """Monte carlo uses hardcoded demo data — should run without mocks."""
+    result = runner.invoke(app, ["quant", "monte-carlo"])
+    assert result.exit_code == 0
+    assert "Monte Carlo" in result.output
+
+
+def test_quant_stress_test_runs():
+    """Stress test uses hardcoded demo data — should run without mocks."""
+    result = runner.invoke(app, ["quant", "stress-test"])
+    assert result.exit_code == 0
+    assert "Stress Test" in result.output
+
+
+# ---------------------------------------------------------------------------
+# Test 24-26: quant commands that need tickers exit gracefully with no portfolio
+# ---------------------------------------------------------------------------
+
+def test_quant_hrp_no_portfolio():
+    """HRP with no tickers and no portfolio should exit with error message."""
+    with patch("trading_master.portfolio.tracker.PortfolioTracker.get_state",
+               return_value=PortfolioState()):
+        result = runner.invoke(app, ["quant", "hrp"])
+    assert result.exit_code == 1
+    assert "No tickers" in result.output or "tickers" in result.output.lower()
+
+
+def test_quant_risk_parity_no_portfolio():
+    """Risk parity with no tickers should exit gracefully."""
+    with patch("trading_master.portfolio.tracker.PortfolioTracker.get_state",
+               return_value=PortfolioState()):
+        result = runner.invoke(app, ["quant", "risk-parity"])
+    assert result.exit_code == 1
+
+
+def test_quant_compare_no_portfolio():
+    """Compare with no tickers should exit gracefully."""
+    with patch("trading_master.portfolio.tracker.PortfolioTracker.get_state",
+               return_value=PortfolioState()):
+        result = runner.invoke(app, ["quant", "compare"])
+    assert result.exit_code == 1
+
+
+def test_quant_markowitz_no_portfolio():
+    """Markowitz with no tickers should exit gracefully."""
+    with patch("trading_master.portfolio.tracker.PortfolioTracker.get_state",
+               return_value=PortfolioState()):
+        result = runner.invoke(app, ["quant", "markowitz"])
+    assert result.exit_code == 1
+
+
+# ---------------------------------------------------------------------------
+# Test: other subcommand --help
+# ---------------------------------------------------------------------------
+
+def test_allocation_help():
+    result = runner.invoke(app, ["allocation", "--help"])
+    assert result.exit_code == 0
+
+
+def test_watchlist_help():
+    result = runner.invoke(app, ["watchlist", "--help"])
+    assert result.exit_code == 0
+
+
+def test_stop_loss_help():
+    result = runner.invoke(app, ["stop-loss", "--help"])
+    assert result.exit_code == 0
+
+
+def test_backtest_help():
+    result = runner.invoke(app, ["backtest", "--help"])
+    assert result.exit_code == 0
