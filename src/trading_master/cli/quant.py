@@ -1,4 +1,4 @@
-"""CLI commands for quantitative analysis (Monte Carlo, DCF, Black-Litterman)."""
+"""CLI commands for quantitative analysis (Monte Carlo, DCF, Black-Litterman, HRP)."""
 
 from __future__ import annotations
 
@@ -254,6 +254,112 @@ def black_litterman_cmd(
             f"{trade['target_pct']:.1f}%",
             Text(trade["direction"], style=dir_style),
         )
+
+    console.print(wt_table)
+    console.print()
+
+
+@quant_app.command("hrp")
+def hrp_cmd(
+    tickers: str = typer.Option(
+        "",
+        "--tickers",
+        "-t",
+        help="Comma-separated tickers (default: current portfolio holdings)",
+    ),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days for covariance"),
+    linkage: str = typer.Option("single", "--linkage", "-l", help="Linkage method: single, complete, average, ward"),
+) -> None:
+    """Run Hierarchical Risk Parity allocation on portfolio holdings."""
+    from ..portfolio.tracker import PortfolioTracker
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.hrp import hrp_allocation
+
+    tracker = PortfolioTracker()
+
+    with console.status("[bold cyan]Loading portfolio...", spinner="dots"):
+        state = tracker.get_state()
+
+    # Determine tickers
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    elif state.positions:
+        ticker_list = sorted(state.positions.keys())
+    else:
+        console.print("[red]No tickers specified and no portfolio positions found.[/red]")
+        console.print("Use: tm quant hrp --tickers AAPL,MSFT,GOOGL,TLT")
+        raise typer.Exit(1)
+
+    if len(ticker_list) < 2:
+        console.print("[red]HRP requires at least 2 tickers.[/red]")
+        raise typer.Exit(1)
+
+    # Fetch returns and compute covariance/correlation
+    with console.status("[bold cyan]Fetching returns data...", spinner="dots"):
+        returns_array, valid_tickers = fetch_returns(ticker_list, lookback_days=lookback)
+
+    if returns_array is None or len(valid_tickers) < 2:
+        console.print("[red]Could not fetch sufficient return data.[/red]")
+        raise typer.Exit(1)
+
+    cov_matrix = np.cov(returns_array, rowvar=False) * 252  # annualize
+    corr_matrix = np.corrcoef(returns_array, rowvar=False)
+
+    with console.status("[bold cyan]Running HRP optimization...", spinner="dots"):
+        result = hrp_allocation(
+            cov_matrix=cov_matrix,
+            corr_matrix=corr_matrix,
+            tickers=list(valid_tickers),
+            linkage_method=linkage,
+        )
+
+    # ── Current weights (from portfolio) ──
+    current_weights: dict[str, float] = {}
+    if state.positions:
+        total_val = sum(
+            state.positions[t].market_value
+            for t in valid_tickers
+            if t in state.positions
+        )
+        if total_val > 0:
+            for t in valid_tickers:
+                if t in state.positions:
+                    current_weights[t] = state.positions[t].market_value / total_val
+                else:
+                    current_weights[t] = 0.0
+
+    # ── Weights table ──
+    wt_table = Table(
+        title=f"HRP Allocation ({linkage} linkage, {result.n_clusters} clusters)",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    wt_table.add_column("Ticker", style="cyan", min_width=8)
+    if current_weights:
+        wt_table.add_column("Current %", justify="right", min_width=10)
+    wt_table.add_column("HRP %", justify="right", min_width=10)
+    if current_weights:
+        wt_table.add_column("Direction", justify="center", min_width=10)
+
+    wd = result.weight_dict
+    for t in valid_tickers:
+        hrp_pct = wd.get(t, 0.0) * 100
+        row = [t]
+        if current_weights:
+            cur_pct = current_weights.get(t, 0.0) * 100
+            row.append(f"{cur_pct:.1f}%")
+        row.append(f"{hrp_pct:.1f}%")
+        if current_weights:
+            cur_pct = current_weights.get(t, 0.0) * 100
+            diff = hrp_pct - cur_pct
+            if diff > 1.0:
+                direction = Text("BUY", style="bold green")
+            elif diff < -1.0:
+                direction = Text("SELL", style="bold red")
+            else:
+                direction = Text("HOLD", style="dim")
+            row.append(direction)
+        wt_table.add_row(*row)
 
     console.print(wt_table)
     console.print()
