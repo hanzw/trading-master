@@ -1,3 +1,5 @@
+![CI](https://github.com/hanzw/trading-master/actions/workflows/ci.yml/badge.svg)
+
 # Trading Master
 
 Multi-agent AI portfolio management system with quantitative risk controls.
@@ -88,7 +90,7 @@ The pipeline is built on LangGraph. LLM calls go through a unified adapter suppo
 
 ```bash
 pip install -e ".[dev]"
-pytest tests/ -v            # 324+ tests
+pytest tests/ -v            # 402+ tests
 ```
 
 ### Project Layout

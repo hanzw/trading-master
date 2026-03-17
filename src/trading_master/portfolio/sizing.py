@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 
 import numpy as np
 
@@ -40,16 +41,19 @@ def volatility_adjusted_shares(
     atr_14: float,
     portfolio_value: float,
     risk_per_trade_pct: float = 1.0,
+    holding_days: int = 20,
 ) -> int:
-    """Size a position so that a 1-ATR adverse move equals *risk_per_trade_pct* of portfolio.
+    """Size position so expected loss over holding period = risk_per_trade_pct of portfolio.
 
+    ATR is scaled by sqrt(holding_days) for multi-day risk estimation.
     Returns the number of whole shares (int).
     """
     if price <= 0 or atr_14 <= 0 or portfolio_value <= 0 or risk_per_trade_pct <= 0:
         return 0
 
-    risk_dollars = portfolio_value * (risk_per_trade_pct / 100.0)
-    shares = risk_dollars / atr_14
+    dollar_risk = portfolio_value * (risk_per_trade_pct / 100.0)
+    scaled_atr = atr_14 * math.sqrt(holding_days)
+    shares = dollar_risk / scaled_atr
 
     return max(int(shares), 0)
 
@@ -140,6 +144,7 @@ def compute_position_size(
     max_position_pct: float = 8.0,
     existing_correlation: float = 0.0,
     regime: str | None = None,
+    holding_days: int = 20,
 ) -> dict:
     """Master sizing function.
 
@@ -162,8 +167,10 @@ def compute_position_size(
             "pct_of_portfolio": 0.0,
         }
 
-    # 1. Volatility-based size
-    vol_shares = volatility_adjusted_shares(price, atr_14, portfolio_value)
+    # 1. Volatility-based size (scaled by holding period)
+    vol_shares = volatility_adjusted_shares(
+        price, atr_14, portfolio_value, holding_days=holding_days,
+    )
     method = "volatility_adjusted"
 
     # 2. Hard cap based on max_position_pct

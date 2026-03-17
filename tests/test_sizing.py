@@ -51,13 +51,18 @@ class TestKellyFraction:
 
 class TestVolatilityAdjustedShares:
     def test_basic(self):
-        # portfolio 100k, risk 1 % = $1000, ATR = $5 → 200 shares
+        # portfolio 100k, risk 1% = $1000, ATR=$5, scaled_atr=5*sqrt(20)≈22.36 → 44 shares
         result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0)
+        assert result == 44
+
+    def test_basic_one_day(self):
+        # With holding_days=1: risk $1000 / ATR $5 = 200 shares (legacy behavior)
+        result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
         assert result == 200
 
     def test_high_atr_fewer_shares(self):
         result = volatility_adjusted_shares(150.0, 10.0, 100_000.0, 1.0)
-        assert result == 100
+        assert result == 22
 
     def test_zero_price(self):
         assert volatility_adjusted_shares(0.0, 5.0, 100_000.0) == 0
@@ -71,6 +76,28 @@ class TestVolatilityAdjustedShares:
     def test_negative_inputs(self):
         assert volatility_adjusted_shares(-10.0, 5.0, 100_000.0) == 0
         assert volatility_adjusted_shares(150.0, -5.0, 100_000.0) == 0
+
+    def test_holding_period_scaling_reduces_size(self):
+        """Multi-day holding period should produce fewer shares than 1-day."""
+        shares_1d = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
+        shares_20d = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20)
+        assert shares_20d < shares_1d
+        # 20-day scaled ATR = 5 * sqrt(20) ≈ 22.36, so ~4.47x fewer shares
+        import math
+        ratio = shares_1d / shares_20d if shares_20d > 0 else float("inf")
+        assert ratio == pytest.approx(math.sqrt(20), abs=1.0)
+
+    def test_holding_days_1_is_unscaled(self):
+        """With holding_days=1, result should match the old 1-day behavior."""
+        # portfolio 100k, risk 1% = $1000, ATR = $5, sqrt(1) = 1 → 200 shares
+        result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
+        assert result == 200
+
+    def test_default_holding_days_is_20(self):
+        """Default holding_days=20 should produce fewer shares than holding_days=1."""
+        default_shares = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0)
+        one_day_shares = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
+        assert default_shares < one_day_shares
 
 
 # ── correlation_adjusted_size ───────────────────────────────────────

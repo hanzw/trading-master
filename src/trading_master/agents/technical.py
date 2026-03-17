@@ -55,6 +55,20 @@ def _build_user_prompt(state: AnalysisState) -> str:
             f"  Active Signals: {', '.join(td.signals) if td.signals else 'none'}\n"
         )
 
+        # Signal validation context (Hurst regime detection)
+        if td.hurst is not None:
+            regime_desc = {
+                "trending": "trending (momentum signals are reliable)",
+                "mean_reverting": "mean-reverting (mean-reversion signals are reliable)",
+                "random_walk": "random walk (most signals are noise)",
+            }.get(td.hurst_regime, td.hurst_regime)
+            parts.append(
+                f"Signal Validation:\n"
+                f"  Hurst Exponent: {td.hurst:.3f} indicating {regime_desc} regime.\n"
+                f"  Focus on: {', '.join(td.recommended_signals) if td.recommended_signals else 'none (noisy regime)'}\n"
+                f"  Ignore: {', '.join(td.suppressed_signals) if td.suppressed_signals else 'none'}\n"
+            )
+
     parts.append(
         "Provide your technical analysis as JSON."
     )

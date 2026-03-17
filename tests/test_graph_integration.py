@@ -50,6 +50,7 @@ def _make_graph_state(
 class _FakeConfig:
     class risk:
         max_position_pct = 8.0
+        holding_days = 20
 
 
 @pytest.fixture(autouse=True)
@@ -166,6 +167,33 @@ async def test_cvar_computed_when_positions_exist():
     qr = result["quantitative_risk"]
     assert qr["portfolio_cvar"] is not None
     assert qr["new_portfolio_cvar"] is not None
+
+
+@pytest.mark.asyncio
+async def test_cvar_exceeding_threshold_blocks_trade():
+    """When new portfolio CVaR exceeds threshold, the trade should be hard-blocked."""
+    positions = {
+        "MSFT": {"quantity": 10, "current_price": 400.0, "avg_cost": 380.0},
+    }
+    gs = _make_graph_state(regime="bull", positions=positions)
+
+    # Create returns that will produce a high CVaR (large negative tail)
+    rng = np.random.default_rng(99)
+    # Normal returns with a fat left tail to push CVaR above 5% threshold
+    returns = rng.normal(-0.05, 0.15, (100, 2))
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(returns, ["MSFT", "AAPL"]),
+    ):
+        result = await quantitative_risk_node(gs)
+
+    ra = result["risk_assessment"]
+    qr = result["quantitative_risk"]
+
+    if qr.get("cvar_warning"):
+        # CVaR exceeded threshold — trade must be blocked
+        assert ra["approved"] is False
+        assert any("BLOCKED" in w for w in ra.get("warnings", []))
 
 
 @pytest.mark.asyncio

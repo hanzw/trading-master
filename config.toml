@@ -18,6 +18,7 @@ cache_ttl_hours = 4
 max_position_pct = 8.0       # Max % of portfolio in single stock
 max_sector_pct = 20.0        # Max % in single sector
 stop_loss_pct = 8.0          # Default stop-loss %
+holding_days = 20            # Holding period for ATR scaling (sqrt(T))
 
 [budget]
 max_cost_per_run = 5.0

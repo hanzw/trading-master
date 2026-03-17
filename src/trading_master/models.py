@@ -148,6 +148,16 @@ class FundamentalData(BaseModel):
     roe: float | None = None
     current_ratio: float | None = None
     summary: str = ""
+    # Multi-year trends (newest first)
+    revenue_history: list[float] = Field(default_factory=list)      # 3-5 years
+    net_income_history: list[float] = Field(default_factory=list)
+    fcf_history: list[float] = Field(default_factory=list)
+    margin_history: list[float] = Field(default_factory=list)       # profit margins
+    # Computed trends
+    revenue_cagr_3yr: float | None = None
+    margin_trend: str = ""          # "expanding", "compressing", "stable"
+    earnings_quality: float | None = None   # 0-100, cash_flow / net_income ratio
+    accruals_ratio: float | None = None     # (net_income - operating_cf) / total_assets
 
 
 class TechnicalData(BaseModel):
@@ -165,6 +175,11 @@ class TechnicalData(BaseModel):
     volume_sma_20: float | None = None
     trend: str = ""  # "bullish", "bearish", "neutral"
     signals: list[str] = Field(default_factory=list)
+    # Signal validation (Hurst exponent / regime detection)
+    hurst: float | None = None
+    hurst_regime: str = ""  # "trending", "mean_reverting", "random_walk"
+    recommended_signals: list[str] = Field(default_factory=list)
+    suppressed_signals: list[str] = Field(default_factory=list)
 
 
 class SentimentData(BaseModel):
