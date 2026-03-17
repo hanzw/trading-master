@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from ..db import get_db
 from ..data.market import fetch_market_data
@@ -29,9 +29,17 @@ class WatchlistManager:
                 max_pe REAL,
                 min_yield REAL,
                 notes TEXT DEFAULT '',
-                active INTEGER DEFAULT 1
+                active INTEGER DEFAULT 1,
+                last_alerted_at TEXT
             );
         """)
+        # Migration: add column if table already exists without it
+        try:
+            self.db.conn.execute(
+                "ALTER TABLE watchlist ADD COLUMN last_alerted_at TEXT"
+            )
+        except Exception:
+            pass  # column already exists
 
     # ── CRUD ────────────────────────────────────────────────────────
 
@@ -85,7 +93,33 @@ class WatchlistManager:
 
     # ── Alert checking ──────────────────────────────────────────────
 
-    def check_alerts(self) -> list[dict]:
+    def _is_within_cooldown(self, last_alerted_at: str | None, cooldown_hours: int) -> bool:
+        """Check if last alert was within the cooldown window."""
+        if last_alerted_at is None or cooldown_hours <= 0:
+            return False
+        try:
+            last_dt = datetime.fromisoformat(last_alerted_at)
+            return datetime.now() - last_dt < timedelta(hours=cooldown_hours)
+        except (ValueError, TypeError):
+            return False
+
+    def _update_last_alerted(self, ticker: str) -> None:
+        """Record that an alert just fired for this ticker."""
+        self.db.conn.execute(
+            "UPDATE watchlist SET last_alerted_at = ? WHERE ticker = ?",
+            (datetime.now().isoformat(), ticker),
+        )
+        self.db.conn.commit()
+
+    def _clear_last_alerted(self, ticker: str) -> None:
+        """Clear the cooldown when the alert condition is no longer met."""
+        self.db.conn.execute(
+            "UPDATE watchlist SET last_alerted_at = NULL WHERE ticker = ?",
+            (ticker,),
+        )
+        self.db.conn.commit()
+
+    def check_alerts(self, cooldown_hours: int = 24) -> list[dict]:
         """Check all watchlist items against current market data.
 
         For each item, fetch current price/PE/yield from yfinance.
@@ -93,6 +127,10 @@ class WatchlistManager:
             {ticker, alert_type, message, current_value, target_value}
         Alert types: 'price_target' (price <= target), 'pe_target' (PE <= max_pe),
                      'yield_target' (yield >= min_yield)
+
+        Alerts are suppressed for *cooldown_hours* after firing. If the condition
+        clears (no longer triggered) and re-triggers, the alert fires again
+        regardless of cooldown.
         """
         items = self.get_all()
         if not items:
@@ -107,9 +145,12 @@ class WatchlistManager:
                 logger.warning("Failed to fetch data for %s: %s", ticker, exc)
                 continue
 
+            triggered = False
+
             # Price target check
             if item["target_price"] is not None and market.current_price > 0:
                 if market.current_price <= item["target_price"]:
+                    triggered = True
                     alerts.append({
                         "ticker": ticker,
                         "alert_type": "price_target",
@@ -124,6 +165,7 @@ class WatchlistManager:
             # PE target check
             if item["max_pe"] is not None and market.pe_ratio is not None:
                 if market.pe_ratio <= item["max_pe"]:
+                    triggered = True
                     alerts.append({
                         "ticker": ticker,
                         "alert_type": "pe_target",
@@ -138,6 +180,7 @@ class WatchlistManager:
             # Yield target check
             if item["min_yield"] is not None and market.dividend_yield is not None:
                 if market.dividend_yield >= item["min_yield"]:
+                    triggered = True
                     alerts.append({
                         "ticker": ticker,
                         "alert_type": "yield_target",
@@ -148,5 +191,17 @@ class WatchlistManager:
                         "current_value": market.dividend_yield,
                         "target_value": item["min_yield"],
                     })
+
+            if not triggered:
+                # Condition cleared — reset cooldown so next trigger fires immediately
+                if item.get("last_alerted_at") is not None:
+                    self._clear_last_alerted(ticker)
+            else:
+                # Condition is active — apply cooldown suppression
+                if self._is_within_cooldown(item.get("last_alerted_at"), cooldown_hours):
+                    # Remove any alerts we just appended for this ticker
+                    alerts = [a for a in alerts if a["ticker"] != ticker]
+                else:
+                    self._update_last_alerted(ticker)
 
         return alerts

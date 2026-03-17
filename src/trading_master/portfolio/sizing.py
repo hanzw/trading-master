@@ -42,17 +42,20 @@ def volatility_adjusted_shares(
     portfolio_value: float,
     risk_per_trade_pct: float = 1.0,
     holding_days: int = 20,
+    hurst: float | None = None,
 ) -> int:
     """Size position so expected loss over holding period = risk_per_trade_pct of portfolio.
 
-    ATR is scaled by sqrt(holding_days) for multi-day risk estimation.
+    ATR is scaled by ``holding_days ** H`` where *H* is the Hurst exponent.
+    When *hurst* is ``None`` the classic ``sqrt(N)`` scaling (H=0.5) is used.
     Returns the number of whole shares (int).
     """
     if price <= 0 or atr_14 <= 0 or portfolio_value <= 0 or risk_per_trade_pct <= 0:
         return 0
 
     dollar_risk = portfolio_value * (risk_per_trade_pct / 100.0)
-    scaled_atr = atr_14 * math.sqrt(holding_days)
+    h = hurst if hurst is not None else 0.5
+    scaled_atr = atr_14 * (holding_days ** h)
     shares = dollar_risk / scaled_atr
 
     return max(int(shares), 0)
@@ -145,10 +148,12 @@ def compute_position_size(
     existing_correlation: float = 0.0,
     regime: str | None = None,
     holding_days: int = 20,
+    hurst: float | None = None,
 ) -> dict:
     """Master sizing function.
 
     Combines volatility-adjusted sizing with a hard cap and correlation haircut.
+    When *hurst* is provided, ATR is scaled by ``N^H`` instead of ``N^0.5``.
 
     Returns::
 
@@ -167,9 +172,9 @@ def compute_position_size(
             "pct_of_portfolio": 0.0,
         }
 
-    # 1. Volatility-based size (scaled by holding period)
+    # 1. Volatility-based size (scaled by holding period, optionally Hurst-aware)
     vol_shares = volatility_adjusted_shares(
-        price, atr_14, portfolio_value, holding_days=holding_days,
+        price, atr_14, portfolio_value, holding_days=holding_days, hurst=hurst,
     )
     method = "volatility_adjusted"
 

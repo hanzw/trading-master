@@ -217,11 +217,12 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         max_position_pct = cfg.risk.max_position_pct
         holding_days = cfg.risk.holding_days
 
-        # 1. Extract ATR and price
+        # 1. Extract ATR, price, and Hurst exponent
         td = gs.get("technical_data") or {}
         md = gs.get("market_data") or {}
         atr_14 = td.get("atr_14") or 0.0
         price = md.get("current_price") or 0.0
+        hurst = td.get("hurst") if td.get("hurst") is not None else None
 
         # 2. Portfolio value
         ps = gs.get("portfolio_state") or {}
@@ -234,7 +235,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         if regime is not None:
             regime = str(regime).lower()
 
-        # 4. Compute quantitative position size (regime-aware, holding-period scaled)
+        # 4. Compute quantitative position size (regime-aware, holding-period scaled, Hurst-aware)
         sizing_result = compute_position_size(
             price=price,
             atr_14=atr_14,
@@ -242,6 +243,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
             max_position_pct=max_position_pct,
             regime=regime,
             holding_days=holding_days,
+            hurst=hurst,
         )
 
         # 5. Correlation check against existing holdings
@@ -269,6 +271,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                         existing_correlation=avg_correlation,
                         regime=regime,
                         holding_days=holding_days,
+                        hurst=hurst,
                     )
             except Exception as exc:
                 logger.warning("Correlation check failed (non-fatal): %s", exc)

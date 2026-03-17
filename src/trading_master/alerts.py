@@ -17,8 +17,11 @@ logger = logging.getLogger(__name__)
 _LAST_REGIME_CACHE_KEY = "alerts:last_regime"
 
 
-def run_all_alerts() -> dict:
+def run_all_alerts(cooldown_hours: int = 24) -> dict:
     """Run ALL alert checks in one call.
+
+    Args:
+        cooldown_hours: Suppress duplicate watchlist alerts within this window.
 
     Returns:
         {
@@ -35,7 +38,7 @@ def run_all_alerts() -> dict:
 
     # 1. Watchlist alerts
     wm = WatchlistManager(db=db)
-    watchlist_alerts = wm.check_alerts()
+    watchlist_alerts = wm.check_alerts(cooldown_hours=cooldown_hours)
 
     # 2. Stop-loss alerts
     slm = StopLossMonitor(db=db)

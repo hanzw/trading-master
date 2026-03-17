@@ -1,5 +1,6 @@
 """Tests for watchlist and unified alert system."""
 
+from datetime import datetime, timedelta
 from unittest.mock import patch, MagicMock
 
 import pytest
@@ -186,6 +187,76 @@ class TestCheckAlerts:
             alerts = wm.check_alerts()
 
         assert alerts == []
+
+
+# ── Alert Cooldown / Hysteresis ────────────────────────────────────
+
+
+class TestAlertCooldown:
+    def test_alert_fires_first_time(self, wm):
+        """First alert should always fire."""
+        wm.add("AAPL", target_price=180.0)
+        mock_market = _make_market("AAPL", price=175.0)
+
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=mock_market):
+            alerts = wm.check_alerts(cooldown_hours=24)
+
+        assert len(alerts) == 1
+        assert alerts[0]["ticker"] == "AAPL"
+
+    def test_alert_suppressed_within_cooldown(self, wm):
+        """Second call within cooldown window should be suppressed."""
+        wm.add("AAPL", target_price=180.0)
+        mock_market = _make_market("AAPL", price=175.0)
+
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=mock_market):
+            alerts1 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts1) == 1
+
+            # Second call — still within cooldown
+            alerts2 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts2) == 0
+
+    def test_alert_fires_after_cooldown_expires(self, wm):
+        """Alert should fire again after cooldown expires."""
+        wm.add("AAPL", target_price=180.0)
+        mock_market = _make_market("AAPL", price=175.0)
+
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=mock_market):
+            alerts1 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts1) == 1
+
+            # Manually backdate last_alerted_at to 25 hours ago
+            expired = (datetime.now() - timedelta(hours=25)).isoformat()
+            wm.db.conn.execute(
+                "UPDATE watchlist SET last_alerted_at = ? WHERE ticker = ?",
+                (expired, "AAPL"),
+            )
+            wm.db.conn.commit()
+
+            alerts2 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts2) == 1
+
+    def test_alert_fires_after_condition_clears_and_retriggers(self, wm):
+        """If condition clears and re-triggers, alert fires regardless of cooldown."""
+        wm.add("AAPL", target_price=180.0)
+
+        triggered_market = _make_market("AAPL", price=175.0)
+        cleared_market = _make_market("AAPL", price=195.0)
+
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=triggered_market):
+            alerts1 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts1) == 1
+
+        # Condition clears (price goes above target)
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=cleared_market):
+            alerts2 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts2) == 0
+
+        # Condition re-triggers — should fire even though we're within 24h of first alert
+        with patch("trading_master.portfolio.watchlist.fetch_market_data", return_value=triggered_market):
+            alerts3 = wm.check_alerts(cooldown_hours=24)
+            assert len(alerts3) == 1
 
 
 # ── run_all_alerts ──────────────────────────────────────────────────

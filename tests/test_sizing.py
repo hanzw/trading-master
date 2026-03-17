@@ -99,6 +99,24 @@ class TestVolatilityAdjustedShares:
         one_day_shares = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
         assert default_shares < one_day_shares
 
+    def test_hurst_mean_reverting_more_shares(self):
+        """H=0.3 (mean-reverting) scales less than H=0.5 → more shares."""
+        shares_sqrt = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=0.5)
+        shares_mr = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=0.3)
+        assert shares_mr > shares_sqrt
+
+    def test_hurst_trending_fewer_shares(self):
+        """H=0.7 (trending) scales more than H=0.5 → fewer shares."""
+        shares_sqrt = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=0.5)
+        shares_trend = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=0.7)
+        assert shares_trend < shares_sqrt
+
+    def test_hurst_none_falls_back_to_sqrt(self):
+        """hurst=None should produce the same result as hurst=0.5."""
+        shares_none = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=None)
+        shares_half = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=20, hurst=0.5)
+        assert shares_none == shares_half
+
 
 # ── correlation_adjusted_size ───────────────────────────────────────
 
