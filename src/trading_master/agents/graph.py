@@ -559,6 +559,30 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                             )
                         ra["warnings"] = warnings
                         gs["risk_assessment"] = ra
+
+                        # Re-run CVaR check with corrected regime + sizing
+                        # (original CVaR used heuristic regime threshold)
+                        try:
+                            cvar_result = await _check_portfolio_cvar(
+                                ticker=ticker,
+                                portfolio_state=ps,
+                                regime=regime,
+                                portfolio_value=portfolio_value,
+                                sizing_result=sizing_result,
+                                price=price,
+                            )
+                            portfolio_cvar = cvar_result["portfolio_cvar"]
+                            new_portfolio_cvar = cvar_result["new_portfolio_cvar"]
+                            if cvar_result["cvar_exceeded"] and not cvar_warning:
+                                warnings.append(cvar_result["warning"])
+                                ra["approved"] = False
+                                cvar_warning = True
+                                ra["warnings"] = warnings
+                                gs["risk_assessment"] = ra
+                        except Exception as exc2:
+                            logger.warning(
+                                "CVaR re-check after HMM override failed (non-fatal): %s", exc2
+                            )
         except Exception as exc:
             logger.warning("HMM regime detection failed (non-fatal): %s", exc)
 

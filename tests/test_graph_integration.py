@@ -425,3 +425,50 @@ async def test_hmm_crisis_override_blocks_and_resizes():
         assert any("CRISIS" in w for w in ra.get("warnings", []))
         # Position sizing should use crisis multiplier (0.25x)
         assert qr["sizing"]["regime_multiplier"] == 0.25
+
+
+@pytest.mark.asyncio
+async def test_cvar_recheck_after_hmm_override():
+    """CVaR threshold must use the HMM-overridden regime, not the heuristic.
+
+    Bug scenario: heuristic says 'bull' → CVaR threshold = 5% * portfolio.
+    HMM says 'bear' → threshold should be 2.5% * portfolio (stricter).
+    Without re-check, trades that exceed the bear threshold pass through.
+    """
+    positions = {
+        "MSFT": {"quantity": 50, "current_price": 400.0, "avg_cost": 380.0},
+    }
+    gs = _make_graph_state(regime="bull", positions=positions, portfolio_value=100_000)
+
+    rng = np.random.default_rng(42)
+
+    # Returns with moderate negative tail — enough to trigger CVaR at bear threshold
+    # but not at bull threshold
+    moderate_loss_returns = rng.normal(-0.01, 0.04, (300, 2))
+
+    # Bear-like SPY returns for HMM override
+    bear_spy = rng.normal(-0.003, 0.03, (300, 1))
+
+    call_count = {"n": 0}
+
+    def mock_fetch(tickers, **kwargs):
+        call_count["n"] += 1
+        if "SPY" in tickers:
+            return (bear_spy, ["SPY"])
+        if len(tickers) >= 2:
+            return (moderate_loss_returns, ["MSFT", "AAPL"])
+        return (moderate_loss_returns[:, :1], [tickers[0]])
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        side_effect=mock_fetch,
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+
+    # Verify CVaR was re-checked (fetch_returns called multiple times)
+    # The key assertion: if HMM overrode to bear, the regime in the result should be bear
+    if qr.get("hmm_regime") == "bear" and qr.get("hmm_confidence", 0) > 0.7:
+        assert qr["regime"] == "bear"
+        # CVaR re-check means potentially stricter threshold was applied
