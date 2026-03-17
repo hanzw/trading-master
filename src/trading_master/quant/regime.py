@@ -103,16 +103,20 @@ def _forward(B: np.ndarray, pi: np.ndarray, A: np.ndarray) -> tuple[np.ndarray, 
 
 
 def _backward(B: np.ndarray, A: np.ndarray, scales: np.ndarray) -> np.ndarray:
-    """Vectorized backward pass with scaling."""
+    """Vectorized backward pass with scaling and numerical guards."""
     T, K = B.shape
     beta = np.zeros((T, K))
     beta[T - 1] = 1.0
 
     for t in range(T - 2, -1, -1):
-        # beta[t] = A @ (B[t+1] * beta[t+1])  — vectorized over K
-        beta[t] = A @ (B[t + 1] * beta[t + 1])
-        if scales[t + 1] > 0:
+        bprod = B[t + 1] * beta[t + 1]
+        # Guard against inf/nan propagation
+        bprod = np.where(np.isfinite(bprod), bprod, 1e-300)
+        beta[t] = A @ bprod
+        if scales[t + 1] > 1e-300:
             beta[t] /= scales[t + 1]
+        # Clamp to prevent overflow
+        beta[t] = np.clip(beta[t], 0, 1e300)
 
     return beta
 
@@ -200,6 +204,8 @@ def fit_regime_model(
 
         # Gamma (state posteriors)
         gamma = alpha * beta
+        # Guard against nan/inf from numerical issues in backward pass
+        gamma = np.where(np.isfinite(gamma), gamma, 1e-300)
         gamma_sum = gamma.sum(axis=1, keepdims=True)
         gamma = gamma / np.maximum(gamma_sum, 1e-300)
 
@@ -211,7 +217,8 @@ def fit_regime_model(
         prev_ll = ll
 
         # M-step
-        pi = gamma[0] / gamma[0].sum()
+        g0_sum = gamma[0].sum()
+        pi = gamma[0] / g0_sum if g0_sum > 1e-300 else np.ones(K) / K
 
         # Transition matrix — vectorized: xi[i,j] = sum_t alpha[t,i]*A[i,j]*B[t+1,j]*beta[t+1,j]
         # alpha[:-1]: (T-1, K), B[1:]*beta[1:]: (T-1, K)
