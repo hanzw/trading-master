@@ -1,1 +1,1 @@
-"""Quantitative analysis tools: Monte Carlo, DCF, Black-Litterman."""
+"""Quantitative analysis tools: Monte Carlo, DCF, Black-Litterman, Fama-French."""
