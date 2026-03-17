@@ -35,6 +35,7 @@ from .risk import risk_app  # noqa: E402
 from .stop_loss import stop_loss_app  # noqa: E402
 from .allocation import allocation_app  # noqa: E402
 from .analyze import register_commands  # noqa: E402
+from .backtest_app import backtest_app  # noqa: E402
 from .watchlist import watchlist_app, register_alerts_command  # noqa: E402
 from .report import register_report_command  # noqa: E402
 
@@ -44,6 +45,7 @@ app.add_typer(risk_app, name="risk")
 app.add_typer(stop_loss_app, name="stop-loss")
 app.add_typer(allocation_app, name="allocation")
 app.add_typer(watchlist_app, name="watchlist")
-register_commands(app)  # analyze, review, backtest, macro are top-level
+app.add_typer(backtest_app, name="backtest")
+register_commands(app)  # analyze, review, macro are top-level
 register_alerts_command(app)  # top-level 'alerts' command
 register_report_command(app)  # top-level 'report' command
