@@ -785,3 +785,71 @@ def ff5_cmd(
     for factor, contrib in attr.items():
         style = "green" if contrib > 0.005 else ("red" if contrib < -0.005 else "dim")
         console.print(f"  [{style}]{factor}: {contrib:.2%}[/]")
+
+
+@quant_app.command("pairs")
+def pairs_cmd(
+    ticker_a: str = typer.Argument(..., help="First ticker"),
+    ticker_b: str = typer.Argument(..., help="Second ticker"),
+    lookback: int = typer.Option(504, "--lookback", help="Lookback days (default 2yr)"),
+) -> None:
+    """Test cointegration between two tickers for pairs trading."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.cointegration import cointegration_test
+
+    a_sym = ticker_a.upper()
+    b_sym = ticker_b.upper()
+
+    console.print(f"[bold]Testing cointegration: {a_sym} / {b_sym}...[/bold]")
+
+    try:
+        import yfinance as yf
+        from datetime import datetime, timedelta
+        end = datetime.now()
+        start = end - timedelta(days=int(lookback * 1.5))
+        hist = yf.download(
+            [a_sym, b_sym],
+            start=start.strftime("%Y-%m-%d"),
+            end=end.strftime("%Y-%m-%d"),
+            progress=False,
+        )["Close"].dropna()
+
+        if len(hist) < 30:
+            console.print("[red]Insufficient price data.[/red]")
+            raise typer.Exit(1)
+
+        prices_a = hist[a_sym].values
+        prices_b = hist[b_sym].values
+    except Exception as exc:
+        console.print(f"[red]Error fetching data:[/red] {exc}")
+        raise typer.Exit(1)
+
+    result = cointegration_test(prices_a, prices_b, ticker_a=a_sym, ticker_b=b_sym)
+
+    coint_style = "bold green" if result.is_cointegrated else "bold red"
+    signal_styles = {
+        "BUY_A_SELL_B": "bold green",
+        "SELL_A_BUY_B": "bold red",
+        "NEUTRAL": "dim",
+    }
+
+    table = Table(title=f"Pairs Analysis — {a_sym} / {b_sym}")
+    table.add_column("Metric", style="cyan")
+    table.add_column("Value", justify="right")
+
+    table.add_row("Cointegrated?", Text("YES" if result.is_cointegrated else "NO", style=coint_style))
+    table.add_row("ADF Statistic", f"{result.adf_statistic:.3f}")
+    table.add_row("ADF p-value", f"{result.adf_pvalue:.4f}")
+    table.add_row("Hedge Ratio", f"{result.hedge_ratio:.4f}")
+    table.add_row("", "")
+    table.add_row("Half-life (days)", f"{result.half_life:.1f}" if result.half_life < 1000 else "inf")
+    table.add_row("Mean-reverting?", Text("YES" if result.is_mean_reverting else "NO",
+                  style="green" if result.is_mean_reverting else "red"))
+    table.add_row("", "")
+    table.add_row("Current Z-score", f"{result.current_zscore:+.2f}")
+    table.add_row("Signal", Text(result.signal, style=signal_styles.get(result.signal, "white")))
+    table.add_row("Signal Strength", f"{result.signal_strength:.2f}")
+    table.add_row("", "")
+    table.add_row("Observations", str(result.n_observations))
+
+    console.print(table)
