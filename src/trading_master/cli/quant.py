@@ -499,3 +499,63 @@ def evt_cmd(
         table.add_row("KS p-value", Text(f"{result.ks_pvalue:.4f}", style=ks_style))
 
     console.print(table)
+
+
+@quant_app.command("regime")
+def regime_cmd(
+    ticker: str = typer.Argument("SPY", help="Ticker to analyze (default: SPY for market regime)"),
+    lookback: int = typer.Option(504, "--lookback", help="Lookback days (default 2yr)"),
+    regimes: int = typer.Option(3, "--regimes", "-k", help="Number of regimes (2 or 3)"),
+) -> None:
+    """Detect market regime using Hidden Markov Model."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.regime import fit_regime_model
+
+    ticker = ticker.upper()
+    console.print(f"[bold]Fitting {regimes}-state HMM for {ticker}...[/bold]")
+
+    try:
+        returns_array, valid = fetch_returns([ticker], lookback_days=lookback)
+    except Exception as exc:
+        console.print(f"[red]Error fetching data:[/red] {exc}")
+        raise typer.Exit(1)
+
+    if returns_array is None or len(valid) == 0:
+        console.print("[red]Could not fetch return data.[/red]")
+        raise typer.Exit(1)
+
+    with console.status("[bold cyan]Running EM (this may take a minute)...", spinner="dots"):
+        try:
+            result = fit_regime_model(returns_array[:, 0], n_regimes=regimes)
+        except Exception as exc:
+            console.print(f"[red]HMM fitting failed:[/red] {exc}")
+            raise typer.Exit(1)
+
+    regime_styles = {"bear": "bold red", "neutral": "yellow", "bull": "bold green"}
+
+    table = Table(title=f"Regime Detection — {ticker} ({result.n_regimes}-state HMM)")
+    table.add_column("Regime", style="cyan")
+    table.add_column("Mean (daily)", justify="right")
+    table.add_column("Volatility (ann.)", justify="right")
+    table.add_column("Persistence", justify="right")
+    table.add_column("Stationary %", justify="right")
+
+    for label in result.regime_labels:
+        info = result.regime_summary[label]
+        style = regime_styles.get(label, "white")
+        ann_vol = info["volatility"] * np.sqrt(252)
+        table.add_row(
+            Text(label.upper(), style=style),
+            f"{info['mean']:.4%}",
+            f"{ann_vol:.1%}",
+            f"{info['persistence']:.1%}",
+            f"{info['stationary_prob']:.1%}",
+        )
+
+    console.print(table)
+
+    cur_style = regime_styles.get(result.current_label, "white")
+    console.print(f"\nCurrent regime: [{cur_style}]{result.current_label.upper()}[/] "
+                  f"(confidence: {result.current_probs[result.current_regime]:.0%})")
+    console.print(f"[dim]Converged: {result.converged} | Iterations: {result.n_iterations} | "
+                  f"Log-likelihood: {result.log_likelihood:.1f}[/dim]")
