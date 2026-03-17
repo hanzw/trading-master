@@ -363,3 +363,82 @@ def hrp_cmd(
 
     console.print(wt_table)
     console.print()
+
+
+@quant_app.command("risk-parity")
+def risk_parity_cmd(
+    tickers: str = typer.Option(
+        "",
+        "--tickers",
+        "-t",
+        help="Comma-separated tickers (default: current portfolio holdings)",
+    ),
+    lookback: int = typer.Option(252, "--lookback", help="Lookback days for covariance"),
+) -> None:
+    """Run Risk Parity (Equal Risk Contribution) allocation on portfolio holdings."""
+    from ..portfolio.tracker import PortfolioTracker
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.risk_parity import risk_parity
+
+    tracker = PortfolioTracker()
+
+    with console.status("[bold cyan]Loading portfolio...", spinner="dots"):
+        state = tracker.get_state()
+
+    if tickers:
+        ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()]
+    elif state.positions:
+        ticker_list = sorted(state.positions.keys())
+    else:
+        console.print("[red]No tickers specified and no portfolio positions found.[/red]")
+        console.print("Use: tm quant risk-parity --tickers AAPL,MSFT,GOOGL,TLT")
+        raise typer.Exit(1)
+
+    if len(ticker_list) < 2:
+        console.print("[red]Risk Parity requires at least 2 tickers.[/red]")
+        raise typer.Exit(1)
+
+    with console.status("[bold cyan]Fetching returns data...", spinner="dots"):
+        returns_array, valid_tickers = fetch_returns(ticker_list, lookback_days=lookback)
+
+    if returns_array is None or len(valid_tickers) < 2:
+        console.print("[red]Could not fetch sufficient return data.[/red]")
+        raise typer.Exit(1)
+
+    cov_matrix = np.cov(returns_array, rowvar=False) * 252
+
+    with console.status("[bold cyan]Running Risk Parity optimization...", spinner="dots"):
+        result = risk_parity(
+            cov_matrix=cov_matrix,
+            tickers=list(valid_tickers),
+        )
+
+    wt_table = Table(
+        title=f"Risk Parity Allocation (ERC, {'converged' if result.converged else 'NOT converged'})",
+        show_header=True,
+        header_style="bold magenta",
+    )
+    wt_table.add_column("Ticker", style="cyan", min_width=8)
+    wt_table.add_column("Weight %", justify="right", min_width=10)
+    wt_table.add_column("Risk Contrib %", justify="right", min_width=14)
+    wt_table.add_column("Target %", justify="right", min_width=10)
+
+    wd = result.weight_dict
+    rd = result.risk_dict
+    target = 100.0 / len(valid_tickers)
+
+    for t in valid_tickers:
+        w_pct = wd.get(t, 0.0) * 100
+        r_pct = rd.get(t, 0.0) * 100
+        diff = abs(r_pct - target)
+        rc_style = "green" if diff < 2.0 else ("yellow" if diff < 5.0 else "red")
+        wt_table.add_row(
+            t,
+            f"{w_pct:.1f}%",
+            Text(f"{r_pct:.1f}%", style=rc_style),
+            f"{target:.1f}%",
+        )
+
+    console.print(wt_table)
+    console.print(f"\n[dim]Portfolio volatility: {result.portfolio_volatility:.2%}[/dim]")
+    console.print()
