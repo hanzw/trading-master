@@ -51,6 +51,7 @@ class _FakeConfig:
     class risk:
         max_position_pct = 8.0
         holding_days = 20
+        tail_multiplier = 2.0
 
 
 @pytest.fixture(autouse=True)

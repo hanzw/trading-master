@@ -39,6 +39,7 @@ class RiskConfig(BaseModel):
     max_sector_pct: float = 20.0
     stop_loss_pct: float = 8.0
     holding_days: int = 20
+    tail_multiplier: float = 2.0
 
 
 class BudgetConfig(BaseModel):

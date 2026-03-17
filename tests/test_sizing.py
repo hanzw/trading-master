@@ -51,18 +51,18 @@ class TestKellyFraction:
 
 class TestVolatilityAdjustedShares:
     def test_basic(self):
-        # portfolio 100k, risk 1% = $1000, ATR=$5, scaled_atr=5*sqrt(20)≈22.36 → 44 shares
+        # portfolio 100k, risk 1% = $1000, ATR=$5, scaled_atr=5*sqrt(20)*2.0≈44.72 → 22 shares
         result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0)
-        assert result == 44
+        assert result == 22
 
     def test_basic_one_day(self):
-        # With holding_days=1: risk $1000 / ATR $5 = 200 shares (legacy behavior)
+        # With holding_days=1: risk $1000 / (ATR $5 * 2.0) = 100 shares
         result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
-        assert result == 200
+        assert result == 100
 
     def test_high_atr_fewer_shares(self):
         result = volatility_adjusted_shares(150.0, 10.0, 100_000.0, 1.0)
-        assert result == 22
+        assert result == 11
 
     def test_zero_price(self):
         assert volatility_adjusted_shares(0.0, 5.0, 100_000.0) == 0
@@ -88,10 +88,10 @@ class TestVolatilityAdjustedShares:
         assert ratio == pytest.approx(math.sqrt(20), abs=1.0)
 
     def test_holding_days_1_is_unscaled(self):
-        """With holding_days=1, result should match the old 1-day behavior."""
-        # portfolio 100k, risk 1% = $1000, ATR = $5, sqrt(1) = 1 → 200 shares
+        """With holding_days=1, result should match the 1-day behavior (with tail_multiplier)."""
+        # portfolio 100k, risk 1% = $1000, ATR = $5 * 2.0 tail = $10, sqrt(1) = 1 → 100 shares
         result = volatility_adjusted_shares(150.0, 5.0, 100_000.0, 1.0, holding_days=1)
-        assert result == 200
+        assert result == 100
 
     def test_default_holding_days_is_20(self):
         """Default holding_days=20 should produce fewer shares than holding_days=1."""
@@ -296,3 +296,30 @@ class TestKellyInComputePositionSize:
         )
         assert result["shares"] == 0
         assert result["kelly_used"] is False
+
+
+# ── Tail multiplier ─────────────────────────────────────────────────
+
+
+class TestTailMultiplier:
+    def test_tail_2x_halves_shares_vs_1x_volatility_adjusted(self):
+        """tail_multiplier=2.0 should produce half the shares of tail_multiplier=1.0."""
+        shares_1x = volatility_adjusted_shares(
+            150.0, 5.0, 100_000.0, 1.0, holding_days=20, tail_multiplier=1.0,
+        )
+        shares_2x = volatility_adjusted_shares(
+            150.0, 5.0, 100_000.0, 1.0, holding_days=20, tail_multiplier=2.0,
+        )
+        assert shares_1x > 0 and shares_2x > 0
+        assert shares_2x == shares_1x // 2
+
+    def test_tail_2x_halves_shares_vs_1x_compute(self):
+        """compute_position_size with tail_multiplier=2.0 produces half the shares of 1.0."""
+        result_1x = compute_position_size(
+            150.0, 5.0, 100_000.0, tail_multiplier=1.0,
+        )
+        result_2x = compute_position_size(
+            150.0, 5.0, 100_000.0, tail_multiplier=2.0,
+        )
+        assert result_1x["shares"] > 0 and result_2x["shares"] > 0
+        assert result_2x["shares"] == result_1x["shares"] // 2

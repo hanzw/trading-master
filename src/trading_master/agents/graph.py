@@ -206,6 +206,113 @@ async def risk_node(gs: GraphState) -> GraphState:
     return gs
 
 
+async def _check_portfolio_cvar(
+    ticker: str,
+    portfolio_state: dict,
+    regime: str | None,
+    portfolio_value: float,
+    sizing_result: dict,
+    price: float,
+) -> dict:
+    """Simulate adding ticker to portfolio and check CVaR.
+
+    Returns {portfolio_cvar, new_portfolio_cvar, cvar_threshold,
+             cvar_exceeded: bool, warning: str | None}
+    """
+    import numpy as np
+
+    positions = portfolio_state.get("positions", {})
+    existing_tickers = [t for t, _p in positions.items() if t != ticker] if isinstance(positions, dict) else []
+
+    result: dict[str, Any] = {
+        "portfolio_cvar": None,
+        "new_portfolio_cvar": None,
+        "cvar_threshold": None,
+        "cvar_exceeded": False,
+        "warning": None,
+    }
+
+    if not existing_tickers or not positions:
+        return result
+
+    # Fetch returns for existing tickers + new ticker
+    all_tickers = existing_tickers + [ticker]
+    returns_array, valid_tickers = fetch_returns(all_tickers)
+
+    if returns_array is None or len(valid_tickers) < 1:
+        return result
+
+    # Build current weights from positions
+    current_values: dict[str, float] = {}
+    for t in valid_tickers:
+        if t == ticker:
+            continue
+        pos = positions.get(t, {})
+        if isinstance(pos, dict):
+            qty = pos.get("quantity", 0)
+            cp = pos.get("current_price", pos.get("avg_cost", 0))
+        else:
+            qty = 0
+            cp = 0
+        current_values[t] = qty * cp
+
+    total_current = sum(current_values.values())
+
+    if total_current <= 0:
+        return result
+
+    # Current portfolio CVaR (existing positions only)
+    existing_valid = [t for t in valid_tickers if t != ticker and t in current_values]
+    if existing_valid:
+        existing_indices = [valid_tickers.index(t) for t in existing_valid]
+        existing_returns = returns_array[:, existing_indices]
+        existing_weights = np.array(
+            [current_values[t] / total_current for t in existing_valid]
+        )
+        result["portfolio_cvar"] = risk_metrics.cvar(
+            existing_weights, existing_returns,
+            confidence=0.95, portfolio_value=portfolio_value,
+        )
+
+    # Simulate adding the new position
+    if ticker in valid_tickers:
+        new_dollar = sizing_result["shares"] * price
+        new_total = total_current + new_dollar
+
+        if new_total > 0:
+            new_valid = [t for t in valid_tickers if t in current_values or t == ticker]
+            new_indices = [valid_tickers.index(t) for t in new_valid]
+            new_returns = returns_array[:, new_indices]
+            new_weights_list = []
+            for t in new_valid:
+                if t == ticker:
+                    new_weights_list.append(new_dollar / new_total)
+                else:
+                    new_weights_list.append(current_values.get(t, 0) / new_total)
+            new_weights = np.array(new_weights_list)
+
+            new_portfolio_cvar = risk_metrics.cvar(
+                new_weights, new_returns,
+                confidence=0.95, portfolio_value=portfolio_value,
+            )
+            result["new_portfolio_cvar"] = new_portfolio_cvar
+
+            # Scale CVaR threshold by regime multiplier
+            from ..portfolio.sizing import _REGIME_MULTIPLIERS
+            regime_mult = _REGIME_MULTIPLIERS.get((regime or "bull").lower(), 1.0)
+            cvar_threshold = 0.05 * portfolio_value * regime_mult
+            result["cvar_threshold"] = cvar_threshold
+
+            if new_portfolio_cvar > cvar_threshold:
+                result["cvar_exceeded"] = True
+                result["warning"] = (
+                    f"BLOCKED: Trade would increase portfolio CVaR to "
+                    f"${new_portfolio_cvar:,.0f} (threshold: ${cvar_threshold:,.0f})"
+                )
+
+    return result
+
+
 async def quantitative_risk_node(gs: GraphState) -> GraphState:
     """Run quantitative risk checks: position sizing + correlation + regime + CVaR."""
     ticker = gs.get("ticker", "")
@@ -216,6 +323,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         cfg = get_config()
         max_position_pct = cfg.risk.max_position_pct
         holding_days = cfg.risk.holding_days
+        tail_multiplier = cfg.risk.tail_multiplier
 
         # 1. Extract ATR, price, and Hurst exponent
         td = gs.get("technical_data") or {}
@@ -288,6 +396,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
             hurst=hurst,
             win_rate=kelly_win_rate,
             avg_win_loss_ratio=kelly_avg_wl_ratio,
+            tail_multiplier=tail_multiplier,
         )
 
         # 6. Correlation check against existing holdings
@@ -318,6 +427,7 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                         hurst=hurst,
                         win_rate=kelly_win_rate,
                         avg_win_loss_ratio=kelly_avg_wl_ratio,
+                        tail_multiplier=tail_multiplier,
                     )
             except Exception as exc:
                 logger.warning("Correlation check failed (non-fatal): %s", exc)
@@ -350,85 +460,27 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
         ra["warnings"] = warnings
         gs["risk_assessment"] = ra
 
-        # 10. Portfolio-level CVaR check (wrapped in try/except — non-blocking)
+        # 10. Portfolio-level CVaR check (delegated to _check_portfolio_cvar)
         portfolio_cvar = None
         new_portfolio_cvar = None
         cvar_warning = False
         try:
-            if existing_tickers and positions:
-                import numpy as np
-
-                # Fetch returns for existing tickers + new ticker
-                all_tickers = existing_tickers + [ticker]
-                returns_array, valid_tickers = fetch_returns(all_tickers)
-
-                if returns_array is not None and len(valid_tickers) >= 1:
-                    # Build current weights from positions
-                    current_values = {}
-                    for t in valid_tickers:
-                        if t == ticker:
-                            continue
-                        pos = positions.get(t, {})
-                        if isinstance(pos, dict):
-                            qty = pos.get("quantity", 0)
-                            cp = pos.get("current_price", pos.get("avg_cost", 0))
-                        else:
-                            qty = 0
-                            cp = 0
-                        current_values[t] = qty * cp
-
-                    total_current = sum(current_values.values())
-
-                    if total_current > 0:
-                        # Current portfolio CVaR (existing positions only)
-                        existing_valid = [t for t in valid_tickers if t != ticker and t in current_values]
-                        if existing_valid:
-                            existing_indices = [valid_tickers.index(t) for t in existing_valid]
-                            existing_returns = returns_array[:, existing_indices]
-                            existing_weights = np.array(
-                                [current_values[t] / total_current for t in existing_valid]
-                            )
-                            portfolio_cvar = risk_metrics.cvar(
-                                existing_weights, existing_returns,
-                                confidence=0.95, portfolio_value=portfolio_value,
-                            )
-
-                        # Simulate adding the new position
-                        if ticker in valid_tickers:
-                            new_dollar = sizing_result["shares"] * price
-                            new_total = total_current + new_dollar
-
-                            if new_total > 0:
-                                new_valid = [t for t in valid_tickers if t in current_values or t == ticker]
-                                new_indices = [valid_tickers.index(t) for t in new_valid]
-                                new_returns = returns_array[:, new_indices]
-                                new_weights_list = []
-                                for t in new_valid:
-                                    if t == ticker:
-                                        new_weights_list.append(new_dollar / new_total)
-                                    else:
-                                        new_weights_list.append(current_values.get(t, 0) / new_total)
-                                new_weights = np.array(new_weights_list)
-
-                                new_portfolio_cvar = risk_metrics.cvar(
-                                    new_weights, new_returns,
-                                    confidence=0.95, portfolio_value=portfolio_value,
-                                )
-
-                                # Scale CVaR threshold by regime multiplier
-                                from ..portfolio.sizing import _REGIME_MULTIPLIERS
-                                regime_mult = _REGIME_MULTIPLIERS.get((regime or "bull").lower(), 1.0)
-                                cvar_threshold = 0.05 * portfolio_value * regime_mult
-                                if new_portfolio_cvar > cvar_threshold:
-                                    warnings.append(
-                                        f"BLOCKED: Trade would increase portfolio CVaR to "
-                                        f"${new_portfolio_cvar:,.0f} (threshold: ${cvar_threshold:,.0f})"
-                                    )
-                                    ra["approved"] = False  # HARD GATE — block the trade
-                                    cvar_warning = True
-                                    ra["warnings"] = warnings
-                                    gs["risk_assessment"] = ra
-
+            cvar_result = await _check_portfolio_cvar(
+                ticker=ticker,
+                portfolio_state=ps,
+                regime=regime,
+                portfolio_value=portfolio_value,
+                sizing_result=sizing_result,
+                price=price,
+            )
+            portfolio_cvar = cvar_result["portfolio_cvar"]
+            new_portfolio_cvar = cvar_result["new_portfolio_cvar"]
+            if cvar_result["cvar_exceeded"]:
+                warnings.append(cvar_result["warning"])
+                ra["approved"] = False  # HARD GATE — block the trade
+                cvar_warning = True
+                ra["warnings"] = warnings
+                gs["risk_assessment"] = ra
         except Exception as exc:
             logger.warning("Portfolio CVaR check failed (non-fatal): %s", exc)
 
