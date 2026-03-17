@@ -523,11 +523,30 @@ async def quantitative_risk_node(gs: GraphState) -> GraphState:
                     hmm_confidence = float(hmm.current_probs[hmm.current_regime])
                     # Override heuristic regime if HMM is confident
                     if hmm_confidence > 0.7 and hmm_regime != regime:
+                        old_regime = regime
                         logger.info(
                             "HMM regime override: %s -> %s (confidence=%.0f%%)",
                             regime, hmm_regime, hmm_confidence * 100,
                         )
                         regime = hmm_regime
+
+                        # CRITICAL: Re-run position sizing with corrected regime
+                        # Without this, bull-sized positions would be used in a bear/crisis market
+                        sizing_result = compute_position_size(
+                            price=price,
+                            atr_14=atr_14,
+                            portfolio_value=portfolio_value,
+                            max_position_pct=max_position_pct,
+                            existing_correlation=avg_correlation,
+                            regime=regime,
+                            holding_days=holding_days,
+                            hurst=hurst,
+                            win_rate=kelly_win_rate,
+                            avg_win_loss_ratio=kelly_avg_wl_ratio,
+                            tail_multiplier=tail_multiplier,
+                        )
+                        ra["max_position_size"] = float(sizing_result["shares"])
+
                         # Re-check crisis/bear warnings with updated regime
                         if regime == "crisis" and ra.get("approved", True):
                             ra["approved"] = False

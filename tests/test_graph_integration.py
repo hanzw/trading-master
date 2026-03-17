@@ -344,3 +344,84 @@ async def test_hmm_failure_non_fatal():
     assert "sizing" in qr
     # Should still use heuristic regime
     assert qr["regime"] == "bear"
+
+
+@pytest.mark.asyncio
+async def test_hmm_regime_override_resizes_position():
+    """CRITICAL: When HMM overrides regime to bear/crisis, position sizing
+    must be recalculated with the new regime multiplier.
+
+    Bug scenario: heuristic says 'bull' (1.0x multiplier), but HMM detects
+    'bear' (0.5x). Without re-sizing, positions are 2x too large.
+    """
+    gs_no_hmm = _make_graph_state(regime="bull")
+    gs_with_hmm = _make_graph_state(regime="bull")
+
+    # No HMM override — pure bull sizing
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        return_value=(None, []),
+    ):
+        result_bull = await quantitative_risk_node(gs_no_hmm)
+
+    bull_shares = result_bull["quantitative_risk"]["sizing"]["shares"]
+
+    # HMM overrides to bear — should re-size with bear multiplier
+    rng = np.random.default_rng(42)
+    # Create returns that produce a clear "bear" regime in the HMM:
+    # alternating between negative-drift and high-vol periods
+    bear_returns = rng.normal(-0.003, 0.03, (300, 1))
+
+    def mock_fetch_returns(tickers, **kwargs):
+        # Return bear-like data for SPY, None for everything else
+        if "SPY" in tickers:
+            return (bear_returns, ["SPY"])
+        return (None, [])
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        side_effect=mock_fetch_returns,
+    ):
+        result_hmm = await quantitative_risk_node(gs_with_hmm)
+
+    qr = result_hmm["quantitative_risk"]
+
+    # If HMM detected bear and overrode, shares should be smaller
+    if qr.get("hmm_regime") == "bear" and qr.get("hmm_confidence", 0) > 0.7:
+        hmm_shares = qr["sizing"]["shares"]
+        assert hmm_shares <= bull_shares, (
+            f"HMM detected bear but position not reduced: "
+            f"bull={bull_shares}, hmm_bear={hmm_shares}"
+        )
+        assert qr["regime"] == "bear"
+
+
+@pytest.mark.asyncio
+async def test_hmm_crisis_override_blocks_and_resizes():
+    """When HMM detects crisis, trade must be blocked AND sizing reduced."""
+    gs = _make_graph_state(regime="bull")
+
+    rng = np.random.default_rng(99)
+    # Very negative returns to trigger crisis detection
+    crisis_returns = rng.normal(-0.008, 0.05, (300, 1))
+
+    def mock_fetch_returns(tickers, **kwargs):
+        if "SPY" in tickers:
+            return (crisis_returns, ["SPY"])
+        return (None, [])
+
+    with patch(
+        "trading_master.agents.graph.fetch_returns",
+        side_effect=mock_fetch_returns,
+    ):
+        result = await quantitative_risk_node(gs)
+
+    qr = result["quantitative_risk"]
+
+    # If HMM detected crisis
+    if qr.get("hmm_regime") == "crisis" and qr.get("hmm_confidence", 0) > 0.7:
+        ra = result["risk_assessment"]
+        assert ra["approved"] is False, "Crisis regime should block trade"
+        assert any("CRISIS" in w for w in ra.get("warnings", []))
+        # Position sizing should use crisis multiplier (0.25x)
+        assert qr["sizing"]["regime_multiplier"] == 0.25
