@@ -4,7 +4,7 @@ Uses a Gaussian HMM to classify market returns into discrete regimes
 (e.g., bull/bear/crisis) based on the statistical properties of returns.
 
 The model is fit via Expectation-Maximization (Baum-Welch algorithm)
-using only numpy/scipy — no external HMM libraries required.
+using vectorized numpy operations — no Python loops over T observations.
 
 Each regime is characterized by its own mean and variance, and the
 model provides:
@@ -21,7 +21,7 @@ References:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import numpy as np
 from scipy.stats import norm
@@ -34,23 +34,19 @@ class RegimeResult:
     """Result of HMM regime detection."""
 
     n_regimes: int
-    # Per-regime parameters (sorted by mean: lowest=bear/crisis, highest=bull)
     means: np.ndarray            # (K,) regime means
     variances: np.ndarray        # (K,) regime variances
-    volatilities: np.ndarray     # (K,) regime std devs (sqrt of variances)
+    volatilities: np.ndarray     # (K,) regime std devs
     transition_matrix: np.ndarray  # (K, K) transition probabilities
     stationary_probs: np.ndarray   # (K,) long-run regime probabilities
 
-    # Sequence results
     regime_sequence: np.ndarray  # (T,) most likely regime at each time step
     regime_probs: np.ndarray     # (T, K) filtered regime probabilities
-    current_regime: int          # most likely regime at last observation
-    current_probs: np.ndarray    # (K,) probabilities for current regime
+    current_regime: int
+    current_probs: np.ndarray    # (K,)
 
-    # Labels
-    regime_labels: list[str]     # human-readable labels
+    regime_labels: list[str]
 
-    # Diagnostics
     log_likelihood: float
     n_iterations: int
     converged: bool
@@ -61,7 +57,6 @@ class RegimeResult:
 
     @property
     def regime_summary(self) -> dict[str, dict]:
-        """Summary of each regime's characteristics."""
         summary = {}
         for i, label in enumerate(self.regime_labels):
             summary[label] = {
@@ -73,35 +68,33 @@ class RegimeResult:
         return summary
 
 
-def _gaussian_emission(x: np.ndarray, mu: float, sigma: float) -> np.ndarray:
-    """Compute Gaussian emission probabilities, clipped for numerical stability."""
-    probs = norm.pdf(x, loc=mu, scale=max(sigma, 1e-10))
-    return np.maximum(probs, 1e-300)
+def _emission_matrix(obs: np.ndarray, means: np.ndarray, stds: np.ndarray) -> np.ndarray:
+    """Compute (T, K) emission probability matrix — fully vectorized."""
+    # obs: (T,), means: (K,), stds: (K,) -> broadcast to (T, K)
+    stds_safe = np.maximum(stds, 1e-10)
+    B = norm.pdf(obs[:, None], loc=means[None, :], scale=stds_safe[None, :])
+    return np.maximum(B, 1e-300)
 
 
-def _forward(obs: np.ndarray, pi: np.ndarray, A: np.ndarray,
-             means: np.ndarray, stds: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Forward pass (alpha computation) with scaling.
+def _forward(B: np.ndarray, pi: np.ndarray, A: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Vectorized forward pass with scaling.
 
-    Returns (alpha_hat, scales) where alpha_hat are scaled forward probs.
+    B : (T, K) emission probs
+    pi : (K,) initial probs
+    A : (K, K) transition matrix
     """
-    T = len(obs)
-    K = len(pi)
+    T, K = B.shape
     alpha = np.zeros((T, K))
     scales = np.zeros(T)
 
-    # t=0
-    for j in range(K):
-        alpha[0, j] = pi[j] * _gaussian_emission(obs[0], means[j], stds[j])
+    alpha[0] = pi * B[0]
     scales[0] = alpha[0].sum()
     if scales[0] > 0:
         alpha[0] /= scales[0]
 
-    # t=1..T-1
     for t in range(1, T):
-        for j in range(K):
-            alpha[t, j] = sum(alpha[t-1, i] * A[i, j] for i in range(K)) * \
-                          _gaussian_emission(obs[t], means[j], stds[j])
+        # alpha[t] = (alpha[t-1] @ A) * B[t]  — vectorized over K
+        alpha[t] = (alpha[t - 1] @ A) * B[t]
         scales[t] = alpha[t].sum()
         if scales[t] > 0:
             alpha[t] /= scales[t]
@@ -109,54 +102,43 @@ def _forward(obs: np.ndarray, pi: np.ndarray, A: np.ndarray,
     return alpha, scales
 
 
-def _backward(obs: np.ndarray, A: np.ndarray,
-              means: np.ndarray, stds: np.ndarray, scales: np.ndarray) -> np.ndarray:
-    """Backward pass (beta computation) with scaling."""
-    T = len(obs)
-    K = A.shape[0]
+def _backward(B: np.ndarray, A: np.ndarray, scales: np.ndarray) -> np.ndarray:
+    """Vectorized backward pass with scaling."""
+    T, K = B.shape
     beta = np.zeros((T, K))
+    beta[T - 1] = 1.0
 
-    beta[T-1, :] = 1.0
-
-    for t in range(T-2, -1, -1):
-        for i in range(K):
-            beta[t, i] = sum(
-                A[i, j] * _gaussian_emission(obs[t+1], means[j], stds[j]) * beta[t+1, j]
-                for j in range(K)
-            )
-        if scales[t+1] > 0:
-            beta[t] /= scales[t+1]
+    for t in range(T - 2, -1, -1):
+        # beta[t] = A @ (B[t+1] * beta[t+1])  — vectorized over K
+        beta[t] = A @ (B[t + 1] * beta[t + 1])
+        if scales[t + 1] > 0:
+            beta[t] /= scales[t + 1]
 
     return beta
 
 
-def _viterbi(obs: np.ndarray, pi: np.ndarray, A: np.ndarray,
-             means: np.ndarray, stds: np.ndarray) -> np.ndarray:
-    """Viterbi algorithm for most likely state sequence."""
-    T = len(obs)
-    K = len(pi)
-
-    # Log domain for numerical stability
+def _viterbi(B: np.ndarray, pi: np.ndarray, A: np.ndarray) -> np.ndarray:
+    """Vectorized Viterbi algorithm."""
+    T, K = B.shape
     log_pi = np.log(np.maximum(pi, 1e-300))
     log_A = np.log(np.maximum(A, 1e-300))
+    log_B = np.log(np.maximum(B, 1e-300))
 
     delta = np.zeros((T, K))
     psi = np.zeros((T, K), dtype=int)
 
-    for j in range(K):
-        delta[0, j] = log_pi[j] + norm.logpdf(obs[0], means[j], max(stds[j], 1e-10))
+    delta[0] = log_pi + log_B[0]
 
     for t in range(1, T):
-        for j in range(K):
-            candidates = delta[t-1] + log_A[:, j]
-            psi[t, j] = int(np.argmax(candidates))
-            delta[t, j] = candidates[psi[t, j]] + norm.logpdf(obs[t], means[j], max(stds[j], 1e-10))
+        # candidates[i, j] = delta[t-1, i] + log_A[i, j]
+        candidates = delta[t - 1, :, None] + log_A  # (K, K)
+        psi[t] = candidates.argmax(axis=0)           # (K,)
+        delta[t] = candidates.max(axis=0) + log_B[t] # (K,)
 
-    # Backtrack
     path = np.zeros(T, dtype=int)
-    path[T-1] = int(np.argmax(delta[T-1]))
-    for t in range(T-2, -1, -1):
-        path[t] = psi[t+1, path[t+1]]
+    path[T - 1] = int(np.argmax(delta[T - 1]))
+    for t in range(T - 2, -1, -1):
+        path[t] = psi[t + 1, path[t + 1]]
 
     return path
 
@@ -192,21 +174,16 @@ def fit_regime_model(
     if K < 2:
         raise ValueError("Need at least 2 regimes.")
 
-    rng = np.random.default_rng(seed)
-
     # ── Initialize parameters ──
-    # Use quantile-based initialization for better convergence
     sorted_ret = np.sort(returns)
     chunk = T // K
-    means = np.array([sorted_ret[i * chunk:(i+1) * chunk].mean() for i in range(K)])
-    stds = np.array([max(sorted_ret[i * chunk:(i+1) * chunk].std(), 1e-6) for i in range(K)])
+    means = np.array([sorted_ret[i * chunk:(i + 1) * chunk].mean() for i in range(K)])
+    stds = np.array([max(sorted_ret[i * chunk:(i + 1) * chunk].std(), 1e-6) for i in range(K)])
 
-    # Transition matrix: high self-persistence
     A = np.full((K, K), 0.05 / (K - 1))
     np.fill_diagonal(A, 0.95)
     A = A / A.sum(axis=1, keepdims=True)
 
-    # Initial state probabilities (uniform)
     pi = np.ones(K) / K
 
     # ── EM loop ──
@@ -214,52 +191,51 @@ def fit_regime_model(
     converged = False
 
     for iteration in range(max_iter):
-        # E-step: forward-backward
-        alpha, scales = _forward(returns, pi, A, means, stds)
-        beta = _backward(returns, A, means, stds, scales)
+        # Emission matrix (T, K) — computed once per iteration
+        B = _emission_matrix(returns, means, stds)
 
-        # Compute gamma (state posteriors) and xi (transition posteriors)
+        # E-step
+        alpha, scales = _forward(B, pi, A)
+        beta = _backward(B, A, scales)
+
+        # Gamma (state posteriors)
         gamma = alpha * beta
         gamma_sum = gamma.sum(axis=1, keepdims=True)
-        gamma_sum = np.maximum(gamma_sum, 1e-300)
-        gamma = gamma / gamma_sum
+        gamma = gamma / np.maximum(gamma_sum, 1e-300)
 
-        # Log-likelihood from scales
+        # Log-likelihood
         ll = np.sum(np.log(np.maximum(scales, 1e-300)))
-
         if abs(ll - prev_ll) < tol:
             converged = True
             break
         prev_ll = ll
 
-        # M-step: update parameters
-        # Initial probabilities
+        # M-step
         pi = gamma[0] / gamma[0].sum()
 
-        # Transition matrix
-        xi = np.zeros((K, K))
-        for t in range(T - 1):
-            for i in range(K):
-                for j in range(K):
-                    xi[i, j] += alpha[t, i] * A[i, j] * \
-                                _gaussian_emission(returns[t+1], means[j], stds[j]) * beta[t+1, j]
-        xi_row_sums = xi.sum(axis=1, keepdims=True)
-        xi_row_sums = np.maximum(xi_row_sums, 1e-300)
-        A = xi / xi_row_sums
+        # Transition matrix — vectorized: xi[i,j] = sum_t alpha[t,i]*A[i,j]*B[t+1,j]*beta[t+1,j]
+        # alpha[:-1]: (T-1, K), B[1:]*beta[1:]: (T-1, K)
+        ab = alpha[:-1]                    # (T-1, K)
+        bb = B[1:] * beta[1:]             # (T-1, K)
+        # xi = sum_t (ab[t, :, None] * A * bb[t, None, :])
+        # = (ab.T @ bb) * A  element-wise — but we need the sum correctly
+        # xi[i,j] = A[i,j] * sum_t ab[t,i] * bb[t,j]
+        xi = A * (ab.T @ bb)              # (K, K)
+        xi_row = xi.sum(axis=1, keepdims=True)
+        A = xi / np.maximum(xi_row, 1e-300)
 
-        # Emission parameters
-        gamma_sum_per_state = gamma.sum(axis=0)
-        gamma_sum_per_state = np.maximum(gamma_sum_per_state, 1e-300)
+        # Emission parameters — vectorized
+        gamma_sum_k = gamma.sum(axis=0)    # (K,)
+        gamma_sum_k = np.maximum(gamma_sum_k, 1e-300)
 
-        for j in range(K):
-            means[j] = np.sum(gamma[:, j] * returns) / gamma_sum_per_state[j]
-            diff = returns - means[j]
-            stds[j] = np.sqrt(np.sum(gamma[:, j] * diff**2) / gamma_sum_per_state[j])
-            stds[j] = max(stds[j], 1e-6)
+        means = (gamma * returns[:, None]).sum(axis=0) / gamma_sum_k
+        diff = returns[:, None] - means[None, :]   # (T, K)
+        stds = np.sqrt((gamma * diff ** 2).sum(axis=0) / gamma_sum_k)
+        stds = np.maximum(stds, 1e-6)
 
     n_iterations = iteration + 1
 
-    # ── Sort regimes by mean (lowest = bear/crisis, highest = bull) ──
+    # ── Sort regimes by mean ──
     order = np.argsort(means)
     means = means[order]
     stds = stds[order]
@@ -268,26 +244,19 @@ def fit_regime_model(
     pi = pi[order]
     gamma = gamma[:, order]
 
-    # Viterbi decoding with sorted parameters
-    regime_seq = _viterbi(returns, pi, A, means, stds)
-    # Remap viterbi output to sorted order
-    remap = np.argsort(order)
-    # Actually we need the inverse: if original regime i mapped to sorted position order[i],
-    # we need sorted regime j to map from original regime order[j]
-    # Since we already sorted A, means, stds, re-run viterbi with sorted params
-    regime_seq = _viterbi(returns, pi, A, means, stds)
+    # Viterbi with sorted params
+    B_sorted = _emission_matrix(returns, means, stds)
+    regime_seq = _viterbi(B_sorted, pi, A)
 
-    # Stationary distribution from transition matrix
+    # Stationary distribution
     try:
         eigenvalues, eigenvectors = np.linalg.eig(A.T)
         idx = np.argmin(np.abs(eigenvalues - 1.0))
         stationary = np.real(eigenvectors[:, idx])
-        stationary = stationary / stationary.sum()
-        stationary = np.maximum(stationary, 0)
+        stationary = np.maximum(stationary / stationary.sum(), 0)
     except Exception:
         stationary = pi
 
-    # Assign labels
     if K == 2:
         labels = ["bear", "bull"]
     elif K == 3:
