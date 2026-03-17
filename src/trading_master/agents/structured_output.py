@@ -33,6 +33,9 @@ def parse_json_response(text: str, model: Type[T] | None = None) -> dict | T:
     """
     data: dict = {}
 
+    if text is None:
+        return data if model is None else data
+
     # Strategy 1: direct parse
     try:
         data = json.loads(text)
