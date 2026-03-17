@@ -995,3 +995,79 @@ def compare_cmd(
                   f"(dispersion={result.dispersion[list(valid_tickers).index(result.min_dispersion_ticker)]:.3f})")
     console.print(f"[bold red]Most disagreement:[/] {result.max_dispersion_ticker} "
                   f"(dispersion={result.dispersion[list(valid_tickers).index(result.max_dispersion_ticker)]:.3f})")
+
+
+@quant_app.command("mtf")
+def mtf_cmd(
+    ticker: str = typer.Argument(..., help="Stock ticker symbol"),
+    lookback: int = typer.Option(504, "--lookback", help="Lookback days (default 2yr)"),
+) -> None:
+    """Multi-timeframe technical analysis (daily/weekly/monthly consensus)."""
+    from ..portfolio.correlation import fetch_returns
+    from ..quant.multi_timeframe import multi_timeframe_analysis
+
+    ticker = ticker.upper()
+    console.print(f"[bold]Multi-timeframe analysis for {ticker}...[/bold]")
+
+    try:
+        import yfinance as yf
+        from datetime import datetime, timedelta
+        end = datetime.now()
+        start = end - timedelta(days=int(lookback * 1.5))
+        hist = yf.download(ticker, start=start.strftime("%Y-%m-%d"),
+                           end=end.strftime("%Y-%m-%d"), progress=False)
+        if hist.empty:
+            console.print("[red]No data returned.[/red]")
+            raise typer.Exit(1)
+        if hasattr(hist.columns, "nlevels") and hist.columns.nlevels > 1:
+            hist.columns = hist.columns.get_level_values(0)
+        prices = hist["Close"].dropna().values
+    except Exception as exc:
+        console.print(f"[red]Error fetching data:[/red] {exc}")
+        raise typer.Exit(1)
+
+    try:
+        result = multi_timeframe_analysis(prices, ticker=ticker)
+    except Exception as exc:
+        console.print(f"[red]Analysis failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    signal_styles = {
+        "BULLISH": "bold green", "BEARISH": "bold red", "NEUTRAL": "dim",
+    }
+    consensus_styles = {
+        "STRONG_BUY": "bold green", "BUY": "green",
+        "HOLD": "yellow",
+        "SELL": "red", "STRONG_SELL": "bold red",
+    }
+
+    table = Table(title=f"Multi-Timeframe — {ticker}")
+    table.add_column("Timeframe", style="cyan")
+    table.add_column("RSI", justify="right")
+    table.add_column("MACD Hist", justify="right")
+    table.add_column("SMA Trend", justify="center")
+    table.add_column("Score", justify="right")
+    table.add_column("Signal", justify="center")
+
+    for tf in result.timeframes:
+        rsi_str = f"{tf.rsi:.1f}" if tf.rsi is not None else "—"
+        macd_str = f"{tf.macd_histogram:+.4f}" if tf.macd_histogram is not None else "—"
+        trend_icon = "UP" if tf.sma_trend > 0 else ("DOWN" if tf.sma_trend < 0 else "FLAT")
+        trend_style = "green" if tf.sma_trend > 0 else ("red" if tf.sma_trend < 0 else "dim")
+
+        table.add_row(
+            tf.timeframe.capitalize(),
+            rsi_str,
+            macd_str,
+            Text(trend_icon, style=trend_style),
+            f"{tf.score:+.2f}",
+            Text(tf.signal, style=signal_styles.get(tf.signal, "white")),
+        )
+
+    console.print(table)
+
+    cs = consensus_styles.get(result.consensus_signal, "white")
+    console.print(f"\nConsensus: [{cs}]{result.consensus_signal}[/] "
+                  f"(score: {result.consensus_score:+.2f}, alignment: {result.alignment})")
+    console.print(f"[dim]Bullish: {result.n_bullish} | Bearish: {result.n_bearish} | "
+                  f"Neutral: {result.n_neutral}[/dim]")
