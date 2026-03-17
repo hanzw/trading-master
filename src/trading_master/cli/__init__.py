@@ -38,6 +38,7 @@ from .analyze import register_commands  # noqa: E402
 from .backtest_app import backtest_app  # noqa: E402
 from .watchlist import watchlist_app, register_alerts_command  # noqa: E402
 from .report import register_report_command  # noqa: E402
+from .init import register_init_command  # noqa: E402
 
 app.add_typer(portfolio_app, name="portfolio")
 app.add_typer(action_app, name="action")
@@ -49,3 +50,4 @@ app.add_typer(backtest_app, name="backtest")
 register_commands(app)  # analyze, review, macro are top-level
 register_alerts_command(app)  # top-level 'alerts' command
 register_report_command(app)  # top-level 'report' command
+register_init_command(app)  # top-level 'init' wizard
