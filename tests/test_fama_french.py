@@ -9,6 +9,7 @@ from trading_master.quant.fama_french import (
     FF5Result,
     FACTOR_NAMES,
     attribute_returns,
+    fetch_french_factors,
     ff5_decompose,
     ff5_decompose_portfolio,
     generate_synthetic_factors,
@@ -302,3 +303,84 @@ class TestAttributeReturns:
         assert "total" in attr
         for name in FACTOR_NAMES:
             assert name in attr
+
+
+# ── fetch_french_factors ───────────────────────────────────────────
+
+
+class TestFetchFrenchFactors:
+    def test_returns_tuple(self):
+        """Mock the download and verify parsing logic."""
+        from unittest.mock import patch, MagicMock
+        import io
+        import zipfile
+
+        # Create a minimal CSV zip in memory
+        csv_content = (
+            "header line\n"
+            ",Mkt-RF,SMB,HML,RMW,CMA,RF\n"
+            "20240101,   0.50,   0.10,  -0.20,   0.15,   0.05,   0.02\n"
+            "20240102,  -0.30,   0.05,   0.10,  -0.05,   0.08,   0.02\n"
+            "20240103,   0.80,  -0.15,   0.30,   0.10,  -0.10,   0.02\n"
+        )
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("test.CSV", csv_content)
+        buf.seek(0)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = buf.read()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            factors, rf = fetch_french_factors()
+
+        assert factors.shape == (3, 5)
+        assert rf.shape == (3,)
+        # Values should be in decimal (divided by 100)
+        assert factors[0, 0] == pytest.approx(0.005)   # 0.50% → 0.005
+        assert rf[0] == pytest.approx(0.0002)           # 0.02% → 0.0002
+
+    def test_n_days_truncation(self):
+        from unittest.mock import patch, MagicMock
+        import io, zipfile
+
+        lines = [f"2024{i:04d},  0.50,  0.10, -0.20,  0.15,  0.05,  0.02" for i in range(100, 200)]
+        csv_content = "header\n,Mkt-RF,SMB,HML,RMW,CMA,RF\n" + "\n".join(lines)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("test.CSV", csv_content)
+        buf.seek(0)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = buf.read()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            factors, rf = fetch_french_factors(n_days=50)
+
+        assert len(factors) == 50
+        assert len(rf) == 50
+
+    def test_download_failure_falls_back(self):
+        from unittest.mock import patch
+        with patch("urllib.request.urlopen", side_effect=Exception("network error")):
+            factors, rf = fetch_french_factors(n_days=100)
+        # Should fall back to synthetic
+        assert factors.shape == (100, 5)
+        assert rf.shape == (100,)
+
+    def test_empty_csv_falls_back(self):
+        from unittest.mock import patch, MagicMock
+        import io, zipfile
+
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("test.CSV", "just a header\nno data\n")
+        buf.seek(0)
+
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = buf.read()
+
+        with patch("urllib.request.urlopen", return_value=mock_resp):
+            factors, rf = fetch_french_factors(n_days=50)
+        # Falls back to synthetic
+        assert factors.shape == (50, 5)

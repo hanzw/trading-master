@@ -15,7 +15,7 @@ from .compare import compare_allocations
 from .dashboard import build_dashboard, compute_risk_score
 from .dcf import auto_dcf
 from .evt import evt_tail_risk, mean_excess_plot_data
-from .fama_french import ff5_decompose, attribute_returns
+from .fama_french import ff5_decompose, fetch_french_factors, attribute_returns
 from .garch import fit_garch, forecast_volatility
 from .hrp import hrp_allocation
 from .markowitz import (
@@ -50,6 +50,7 @@ __all__ = [
     "mean_excess_plot_data",
     # Fama-French
     "ff5_decompose",
+    "fetch_french_factors",
     "attribute_returns",
     # GARCH
     "fit_garch",

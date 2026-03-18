@@ -734,9 +734,9 @@ def ff5_cmd(
     ticker: str = typer.Argument(..., help="Stock ticker symbol"),
     lookback: int = typer.Option(252, "--lookback", help="Lookback days"),
 ) -> None:
-    """Run Fama-French 5-factor decomposition (uses synthetic factors as proxy)."""
+    """Run Fama-French 5-factor decomposition using real Ken French data."""
     from ..portfolio.correlation import fetch_returns
-    from ..quant.fama_french import ff5_decompose, generate_synthetic_factors, attribute_returns
+    from ..quant.fama_french import ff5_decompose, fetch_french_factors, attribute_returns
 
     ticker = ticker.upper()
 
@@ -750,8 +750,14 @@ def ff5_cmd(
     asset_ret = returns_array[:, 0]
     n_days = len(asset_ret)
 
-    # Use synthetic factors as proxy (real FF data requires Ken French's site)
-    factors, rf = generate_synthetic_factors(n_days=n_days, seed=42)
+    with console.status("[bold cyan]Downloading FF5 factor data...", spinner="dots"):
+        factors, rf = fetch_french_factors(n_days=n_days)
+
+    # Align lengths (real data may have different trading days)
+    min_n = min(len(asset_ret), len(factors))
+    asset_ret = asset_ret[-min_n:]
+    factors = factors[-min_n:]
+    rf = rf[-min_n:]
     excess_ret = asset_ret - rf
 
     result = ff5_decompose(excess_ret, factors, ticker=ticker)

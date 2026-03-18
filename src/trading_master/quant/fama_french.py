@@ -196,6 +196,70 @@ def ff5_decompose_portfolio(
     return results
 
 
+_FF5_URL = (
+    "https://mba.tuck.dartmouth.edu/pages/faculty/ken.french/"
+    "ftp/F-F_Research_Data_5_Factors_2x3_daily_CSV.zip"
+)
+
+
+def fetch_french_factors(
+    n_days: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Download real Fama-French 5-Factor daily data from Ken French's website.
+
+    Returns the most recent *n_days* of data (default: all available).
+
+    Returns
+    -------
+    (factor_returns, risk_free_rates)
+      factor_returns: (n, 5) daily [Mkt-RF, SMB, HML, RMW, CMA] in decimal
+      risk_free_rates: (n,) daily risk-free rate in decimal
+    """
+    import io
+    import urllib.request
+    import zipfile
+
+    logger.info("Downloading FF5 daily factors from Ken French's website...")
+    try:
+        resp = urllib.request.urlopen(_FF5_URL, timeout=30)
+        z = zipfile.ZipFile(io.BytesIO(resp.read()))
+        csv_name = z.namelist()[0]
+        raw = z.read(csv_name).decode("utf-8")
+    except Exception as exc:
+        logger.warning("FF5 download failed: %s — falling back to synthetic data", exc)
+        return generate_synthetic_factors(n_days=n_days or 252)
+
+    # Parse CSV: skip header lines, find the data start
+    lines = raw.splitlines()
+    data_rows: list[list[float]] = []
+    for line in lines:
+        parts = line.strip().split(",")
+        if len(parts) != 7:
+            continue
+        try:
+            # First column is date (YYYYMMDD), rest are factor values in %
+            int(parts[0].strip())  # validate it's a date
+            vals = [float(v.strip()) / 100.0 for v in parts[1:]]  # convert % to decimal
+            data_rows.append(vals)
+        except (ValueError, IndexError):
+            continue
+
+    if not data_rows:
+        logger.warning("FF5 parse returned no data — falling back to synthetic")
+        return generate_synthetic_factors(n_days=n_days or 252)
+
+    all_data = np.array(data_rows)  # (n, 6): Mkt-RF, SMB, HML, RMW, CMA, RF
+
+    if n_days is not None and n_days < len(all_data):
+        all_data = all_data[-n_days:]
+
+    factors = all_data[:, :5]   # Mkt-RF, SMB, HML, RMW, CMA
+    rf = all_data[:, 5]         # RF
+
+    logger.info("FF5 data loaded: %d days", len(factors))
+    return factors, rf
+
+
 def generate_synthetic_factors(
     n_days: int = 252,
     seed: int | None = None,
@@ -210,13 +274,12 @@ def generate_synthetic_factors(
     """
     rng = np.random.default_rng(seed)
 
-    # Realistic daily factor statistics (annualized mean, annualized vol)
     factor_stats = {
-        "Mkt-RF": (0.08, 0.16),   # Market premium ~8%, vol ~16%
-        "SMB":    (0.02, 0.10),    # Size premium ~2%, vol ~10%
-        "HML":    (0.03, 0.10),    # Value premium ~3%, vol ~10%
-        "RMW":    (0.03, 0.08),    # Profitability premium ~3%, vol ~8%
-        "CMA":    (0.02, 0.07),    # Investment premium ~2%, vol ~7%
+        "Mkt-RF": (0.08, 0.16),
+        "SMB":    (0.02, 0.10),
+        "HML":    (0.03, 0.10),
+        "RMW":    (0.03, 0.08),
+        "CMA":    (0.02, 0.07),
     }
 
     factors = np.zeros((n_days, 5))
@@ -225,7 +288,6 @@ def generate_synthetic_factors(
         daily_vol = ann_vol / np.sqrt(252)
         factors[:, i] = rng.normal(daily_mean, daily_vol, n_days)
 
-    # Risk-free rate (~4% annually)
     rf_daily = 0.04 / 252
     risk_free = np.full(n_days, rf_daily)
 
